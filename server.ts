@@ -7,15 +7,15 @@ import { PrismaClient, Role, RideStatus } from "@prisma/client";
 
 dotenv.config();
 const app=express(), prisma=new PrismaClient();
-const allowedOrigins = (process.env.CORS_ORIGIN || "*").split(",").map(v => v.trim()).filter(Boolean);
-app.use(cors({ origin: allowedOrigins.includes("*") ? true : allowedOrigins }));
-app.use(express.json({ limit: "1mb" }));
-const secret=process.env.JWT_SECRET || "";
-if (!secret && process.env.NODE_ENV === "production") throw new Error("JWT_SECRET é obrigatório em produção");
-const jwtSecret = secret || "development-secret";
-const commissionPercent=Math.min(100, Math.max(0, Number(process.env.BORA_COMMISSION_PERCENT || 20)));
+const allowedOrigins=(process.env.CORS_ORIGIN||"*").split(",").map(v=>v.trim()).filter(Boolean);
+app.use(cors({origin:allowedOrigins.includes("*")?true:allowedOrigins}));
+app.use(express.json({limit:"1mb"}));
+const secret=process.env.JWT_SECRET||"";
+if(!secret&&process.env.NODE_ENV==="production") throw new Error("JWT_SECRET é obrigatório em produção");
+const jwtSecret=secret||"development-secret";
+const commissionPercent=Math.min(100,Math.max(0,Number(process.env.BORA_COMMISSION_PERCENT||20)));
 function validCoordinate(lat:number,lng:number){return Number.isFinite(lat)&&Number.isFinite(lng)&&lat>=-90&&lat<=90&&lng>=-180&&lng<=180;}
-function publicDriver(d:any){return d ? {id:d.id,userId:d.userId,online:d.online,latitude:d.latitude,longitude:d.longitude,rating:d.rating,updatedAt:d.updatedAt} : null;}
+function publicDriver(d:any){return d?{id:d.id,userId:d.userId,online:d.online,latitude:d.latitude,longitude:d.longitude,rating:d.rating,updatedAt:d.updatedAt}:null;}
 function makeToken(u:{id:string;role:Role}){return jwt.sign({id:u.id,role:u.role},jwtSecret,{expiresIn:"7d"});}
 function auth(req:express.Request,res:express.Response,next:express.NextFunction){const h=req.headers.authorization;if(!h?.startsWith("Bearer "))return res.status(401).json({error:"Não autorizado"});try{(req as any).user=jwt.verify(h.slice(7),jwtSecret);next();}catch{return res.status(401).json({error:"Token inválido"});}}
 function role(req:express.Request,r:Role){return (req as any).user?.role===r;}
@@ -105,7 +105,7 @@ function fareFor(distanceKm:number){
 app.get("/api/rides/estimate",auth,async(req,res)=>{
  if(!role(req,Role.PASSENGER))return res.status(403).json({error:"Apenas passageiros"});
  const originLat=Number(req.query.originLat),originLng=Number(req.query.originLng),destinationLat=Number(req.query.destinationLat),destinationLng=Number(req.query.destinationLng);
- if([originLat,originLng,destinationLat,destinationLng].some(v=>!Number.isFinite(v)))return res.status(400).json({error:"Coordenadas inválidas"});
+ if(!validCoordinate(originLat,originLng)||!validCoordinate(destinationLat,destinationLng))return res.status(400).json({error:"Coordenadas inválidas"});
  res.json(fareFor(haversineKm(originLat,originLng,destinationLat,destinationLng)));
 });
 app.post("/api/rides",auth,async(req,res)=>{if(!role(req,Role.PASSENGER))return res.status(403).json({error:"Apenas passageiros"});const{originLat,originLng,destinationLat,destinationLng}=req.body;if(!validCoordinate(originLat,originLng)||!validCoordinate(destinationLat,destinationLng))return res.status(400).json({error:"Dados da corrida inválidos"});const quote=fareFor(haversineKm(originLat,originLng,destinationLat,destinationLng));const estimatedFare=quote.estimatedFare;const commission=Number((estimatedFare*commissionPercent/100).toFixed(2));const payout=Number((estimatedFare-commission).toFixed(2));const ride=await prisma.ride.create({data:{passengerId:(req as any).user.id,originLat,originLng,destinationLat,destinationLng,estimatedFare,commission,driverPayout:payout,status:RideStatus.SEARCHING_DRIVER}});res.status(201).json({...ride,distanceKm:quote.distanceKm,durationMin:quote.durationMin});});
@@ -115,6 +115,4 @@ async function changeRide(req:express.Request,res:express.Response,status:RideSt
 app.post("/api/rides/:id/start",auth,(req,res)=>changeRide(req,res,RideStatus.IN_PROGRESS));
 app.post("/api/rides/:id/finish",auth,(req,res)=>changeRide(req,res,RideStatus.COMPLETED));
 app.post("/api/rides/:id/cancel",auth,async(req,res)=>{const ride=await prisma.ride.findUnique({where:{id:req.params.id},include:{driver:true}});if(!ride)return res.status(404).json({error:"Corrida não encontrada"});const uid=(req as any).user.id;if(ride.passengerId!==uid&&ride.driver?.userId!==uid)return res.status(403).json({error:"Sem permissão"});if([RideStatus.COMPLETED,RideStatus.CANCELLED].includes(ride.status))return res.status(409).json({error:"Corrida já encerrada"});res.json(await prisma.ride.update({where:{id:ride.id},data:{status:RideStatus.CANCELLED}}));});
-app.use((_req,res)=>res.status(404).json({error:"Rota não encontrada"}));
-app.use((err:any,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{console.error(err);if(res.headersSent)return;res.status(500).json({error:"Erro interno do servidor"});});
-const port=Number(process.env.PORT||3000);app.listen(port,()=>console.log("BORA Backend v2.2 rodando na porta "+port));
+const port=Number(process.env.PORT||3000);app.listen(port,()=>console.log("BORA Backend v2.1 rodando na porta "+port));

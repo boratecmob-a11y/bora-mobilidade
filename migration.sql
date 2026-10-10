@@ -1,5 +1,6 @@
 CREATE TYPE "Role" AS ENUM ('PASSENGER', 'DRIVER', 'ADMIN');
 CREATE TYPE "RideStatus" AS ENUM ('REQUESTED', 'SEARCHING_DRIVER', 'DRIVER_ACCEPTED', 'DRIVER_ARRIVING', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED');
+
 CREATE TABLE "User" (
   "id" TEXT NOT NULL,
   "name" TEXT NOT NULL,
@@ -9,6 +10,8 @@ CREATE TABLE "User" (
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT "User_pkey" PRIMARY KEY ("id")
 );
+CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
+
 CREATE TABLE "Driver" (
   "id" TEXT NOT NULL,
   "userId" TEXT NOT NULL,
@@ -23,6 +26,8 @@ CREATE TABLE "Driver" (
   "mpTokenExpiresAt" TIMESTAMP(3),
   CONSTRAINT "Driver_pkey" PRIMARY KEY ("id")
 );
+CREATE UNIQUE INDEX "Driver_userId_key" ON "Driver"("userId");
+
 CREATE TABLE "Ride" (
   "id" TEXT NOT NULL,
   "passengerId" TEXT NOT NULL,
@@ -42,8 +47,9 @@ CREATE TABLE "Ride" (
   "mpPaymentId" TEXT,
   CONSTRAINT "Ride_pkey" PRIMARY KEY ("id")
 );
-CREATE UNIQUE INDEX "User_email_key" ON "User"("email");
-CREATE UNIQUE INDEX "Driver_userId_key" ON "Driver"("userId");
+CREATE INDEX "Ride_passengerId_idx" ON "Ride"("passengerId");
+CREATE INDEX "Ride_driverId_idx" ON "Ride"("driverId");
+CREATE INDEX "Ride_status_idx" ON "Ride"("status");
 ALTER TABLE "Driver" ADD CONSTRAINT "Driver_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "Ride" ADD CONSTRAINT "Ride_passengerId_fkey" FOREIGN KEY ("passengerId") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 ALTER TABLE "Ride" ADD CONSTRAINT "Ride_driverId_fkey" FOREIGN KEY ("driverId") REFERENCES "Driver"("id") ON DELETE SET NULL ON UPDATE CASCADE;

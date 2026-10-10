@@ -1,39 +1,25 @@
 # BORA Mobilidade — Backend
 
-Backend da plataforma BORA Mobilidade, com Node.js, TypeScript, Express, Prisma e PostgreSQL.
+Backend da plataforma BORA Mobilidade (Node.js + Express + Prisma + PostgreSQL).
 
-## Estrutura
-- `src/server.ts` — API HTTP
-- `prisma/schema.prisma` — modelo PostgreSQL
-- `prisma/migrations/` — migrações de banco
-- `render.yaml` — deploy no Render
+## Rodar localmente
 
-## Local
 ```bash
 npm install
 cp .env.example .env
-npx prisma migrate dev
+npx prisma generate
+npx prisma migrate deploy
 npm run dev
 ```
 
-## Produção
-O Render executa `prisma migrate deploy` antes de iniciar a API. Configure `CORS_ORIGIN` com as origens dos seus aplicativos/sites.
+## Produção / Render
 
-## Principais endpoints
-- `GET /health`
-- `POST /api/auth/register`
-- `POST /api/auth/login`
-- `POST /api/drivers/online`
-- `POST /api/drivers/location`
-- `GET /api/rides/available`
-- `GET /api/rides/estimate`
-- `POST /api/rides`
-- `GET /api/rides/:id`
-- `POST /api/rides/:id/accept`
-- `POST /api/rides/:id/start`
-- `POST /api/rides/:id/finish`
-- `POST /api/rides/:id/cancel`
-- Mercado Pago: `/api/mercadopago/*` e `/api/payments/*`
+Build: `npm install && npx prisma generate && npm run build`
 
-## Observação
-A tarifa usa distância em linha reta (Haversine), não distância real de rota. Para produção, o cálculo pode ser conectado a um provedor de rotas.
+Start: `npx prisma migrate deploy && npm start`
+
+Variáveis obrigatórias: `DATABASE_URL` e `JWT_SECRET`.
+
+Para Mercado Pago, configure `MP_APP_ID`, `MP_CLIENT_SECRET`, `MP_REDIRECT_URI` e `MP_NOTIFICATION_URL`.
+
+Health check: `/health`
