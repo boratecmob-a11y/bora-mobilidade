@@ -48,4 +48,3 @@ model Ride {
  paymentStatus String @default("NOT_PAID")
  mpPreferenceId String?
  mpPaymentId String?
-}
