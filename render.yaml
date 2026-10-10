@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     buildCommand: npm install && npx prisma generate && npm run build
-    startCommand: npm start
+    startCommand: npx prisma migrate deploy && npm start
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -12,8 +12,12 @@ services:
           property: connectionString
       - key: JWT_SECRET
         generateValue: true
+      - key: NODE_ENV
+        value: production
       - key: PORT
         value: 10000
+      - key: CORS_ORIGIN
+        sync: false
       - key: BORA_COMMISSION_PERCENT
         value: "20"
       - key: BORA_BASE_FARE

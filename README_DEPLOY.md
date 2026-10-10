@@ -1,17 +1,9 @@
-# BORA v2.2 — implantação em nuvem
+# Deploy do BORA no Render
 
-## Render
-1. Crie um Web Service usando este projeto.
-2. O `render.yaml` já define o serviço Node e o PostgreSQL.
-3. O build usa `npm install` porque o projeto ainda não inclui `package-lock.json`.
-4. Antes de produção, é necessário criar e revisar as migrations do Prisma para preparar o banco com segurança; não execute migrações automaticamente até essa etapa estar pronta.
-5. Configure as variáveis `MP_APP_ID`, `MP_CLIENT_SECRET`, `MP_REDIRECT_URI` e `MP_NOTIFICATION_URL` depois de conhecer o domínio HTTPS.
+1. Suba este diretório como projeto do backend.
+2. Use o `render.yaml` incluído para criar a API e o PostgreSQL.
+3. Configure `CORS_ORIGIN`, `MP_APP_ID`, `MP_CLIENT_SECRET`, `MP_REDIRECT_URI` e `MP_NOTIFICATION_URL`.
+4. O deploy gera o Prisma Client, compila TypeScript e aplica as migrações.
+5. Valide `GET /health` antes de conectar os aplicativos.
 
-
-## Mercado Pago
-- Redirect URI: `https://SEU-DOMINIO/api/mercadopago/callback`
-- Webhook: `https://SEU-DOMINIO/api/payments/webhook`
-- Nunca coloque `MP_CLIENT_SECRET` no aplicativo Android.
-
-## Banco
-A produção usa PostgreSQL. SQLite fica apenas para versões locais antigas.
+Nunca publique `.env` ou tokens do Mercado Pago no Git.

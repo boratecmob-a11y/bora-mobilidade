@@ -1,31 +1,39 @@
-# BORA Backend v1.7
+# BORA Mobilidade — Backend
 
-Backend Node.js + TypeScript + Express + Prisma + SQLite para desenvolvimento.
+Backend da plataforma BORA Mobilidade, com Node.js, TypeScript, Express, Prisma e PostgreSQL.
 
-## Instalação
+## Estrutura
+- `src/server.ts` — API HTTP
+- `prisma/schema.prisma` — modelo PostgreSQL
+- `prisma/migrations/` — migrações de banco
+- `render.yaml` — deploy no Render
+
+## Local
 ```bash
 npm install
 cp .env.example .env
-npx prisma migrate dev --name init
+npx prisma migrate dev
 npm run dev
 ```
 
-## Endpoints principais
+## Produção
+O Render executa `prisma migrate deploy` antes de iniciar a API. Configure `CORS_ORIGIN` com as origens dos seus aplicativos/sites.
+
+## Principais endpoints
 - `GET /health`
 - `POST /api/auth/register`
 - `POST /api/auth/login`
 - `POST /api/drivers/online`
 - `POST /api/drivers/location`
 - `GET /api/rides/available`
+- `GET /api/rides/estimate`
 - `POST /api/rides`
 - `GET /api/rides/:id`
 - `POST /api/rides/:id/accept`
 - `POST /api/rides/:id/start`
 - `POST /api/rides/:id/finish`
 - `POST /api/rides/:id/cancel`
+- Mercado Pago: `/api/mercadopago/*` e `/api/payments/*`
 
-A aceitação usa uma atualização condicional para reduzir o risco de dois motoristas aceitarem a mesma corrida.
-
-
-### Pagamentos v2.1
-Configure `MP_APP_ID`, `MP_CLIENT_SECRET`, `MP_REDIRECT_URI` e `MP_NOTIFICATION_URL` no `.env`. O webhook deve apontar para uma URL HTTPS pública. Para testes, use as contas de teste do Mercado Pago.
+## Observação
+A tarifa usa distância em linha reta (Haversine), não distância real de rota. Para produção, o cálculo pode ser conectado a um provedor de rotas.
