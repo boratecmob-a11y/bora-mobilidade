@@ -1,0 +1,54 @@
+generator client { provider = "prisma-client-js" }
+datasource db { provider = "postgresql"; url = env("DATABASE_URL") }
+
+enum Role { PASSENGER DRIVER ADMIN }
+enum VehicleType { CAR MOTO }
+enum RideStatus { REQUESTED SEARCHING_DRIVER DRIVER_ACCEPTED DRIVER_ARRIVING IN_PROGRESS COMPLETED CANCELLED }
+
+model User {
+ id String @id @default(cuid())
+ name String
+ email String @unique
+ passwordHash String
+ role Role
+ createdAt DateTime @default(now())
+ driver Driver?
+ passengerRides Ride[] @relation("PassengerRides")
+}
+model Driver {
+ id String @id @default(cuid())
+ userId String @unique
+ user User @relation(fields:[userId], references:[id])
+ online Boolean @default(false)
+ latitude Float?
+ longitude Float?
+ rating Float @default(5)
+ vehicleType VehicleType @default(CAR)
+ rides Ride[] @relation("DriverRides")
+ updatedAt DateTime @updatedAt
+ mpAccessToken String?
+ mpRefreshToken String?
+ mpUserId String?
+ mpTokenExpiresAt DateTime?
+}
+model Ride {
+ id String @id @default(cuid())
+ passengerId String
+ driverId String?
+ passenger User @relation("PassengerRides", fields:[passengerId], references:[id])
+ driver Driver? @relation("DriverRides", fields:[driverId], references:[id])
+ originLat Float
+ originLng Float
+ destinationLat Float
+ destinationLng Float
+ vehicleType VehicleType @default(CAR)
+ estimatedFare Float
+ commission Float
+ driverPayout Float
+ status RideStatus @default(REQUESTED)
+ createdAt DateTime @default(now())
+ updatedAt DateTime @updatedAt
+ paymentStatus String @default("NOT_PAID")
+ mpPreferenceId String?
+ mpPaymentId String?
+}
