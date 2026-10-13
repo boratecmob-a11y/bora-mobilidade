@@ -46,10 +46,7 @@ model Driver {
   rides             Ride[]   @relation("DriverRides")
   updatedAt         DateTime @updatedAt
 
-  mpAccessToken     String?
-  mpRefreshToken    String?
-  mpUserId          String?
-  mpTokenExpiresAt  DateTime?
+  asaasAccountId    String?
 }
 
 model Ride {
@@ -74,6 +71,6 @@ model Ride {
   updatedAt        DateTime   @updatedAt
 
   paymentStatus    String     @default("NOT_PAID")
-  mpPreferenceId   String?
-  mpPaymentId      String?
+  asaasPaymentId   String?
+  asaasCustomerId  String?
 }
