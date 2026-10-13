@@ -23,12 +23,18 @@ enum RideStatus {
   CANCELLED
 }
 
+enum VehicleType {
+  CAR
+  MOTO
+}
+
 model User {
   id              String   @id @default(cuid())
   name            String
   email           String   @unique
   passwordHash    String
   role            Role
+  cpfCnpj         String?
   createdAt       DateTime @default(now())
 
   driver          Driver?
@@ -36,41 +42,46 @@ model User {
 }
 
 model Driver {
-  id                String   @id @default(cuid())
-  userId            String   @unique
-  user              User     @relation(fields: [userId], references: [id])
-  online            Boolean  @default(false)
-  latitude          Float?
-  longitude         Float?
-  rating            Float    @default(5)
-  rides             Ride[]   @relation("DriverRides")
-  updatedAt         DateTime @updatedAt
+  id             String      @id @default(cuid())
+  userId         String      @unique
+  user            User        @relation(fields: [userId], references: [id])
+  online         Boolean     @default(false)
+  latitude       Float?
+  longitude      Float?
+  rating         Float       @default(5)
+  vehicleType    VehicleType?
+  rides          Ride[]      @relation("DriverRides")
+  updatedAt      DateTime    @updatedAt
 
-  asaasAccountId    String?
+  asaasAccountId String?
 }
 
 model Ride {
-  id               String     @id @default(cuid())
+  id               String      @id @default(cuid())
   passengerId      String
   driverId         String?
 
-  passenger        User       @relation("PassengerRides", fields: [passengerId], references: [id])
-  driver           Driver?    @relation("DriverRides", fields: [driverId], references: [id])
+  passenger        User        @relation("PassengerRides", fields: [passengerId], references: [id])
+  driver           Driver?     @relation("DriverRides", fields: [driverId], references: [id])
 
   originLat        Float
   originLng        Float
   destinationLat   Float
   destinationLng   Float
 
+  vehicleType      VehicleType
   estimatedFare    Float
   commission       Float
   driverPayout     Float
 
-  status           RideStatus @default(REQUESTED)
-  createdAt        DateTime   @default(now())
-  updatedAt        DateTime   @updatedAt
+  status           RideStatus  @default(REQUESTED)
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
 
-  paymentStatus    String     @default("NOT_PAID")
+  paymentStatus    String      @default("NOT_PAID")
   asaasPaymentId   String?
   asaasCustomerId  String?
+
+  @@index([status, vehicleType, driverId])
+  @@index([passengerId, createdAt])
 }
