@@ -3,8 +3,8 @@
   "version": "2.2.0",
   "private": true,
   "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "build": "tsc",
+    "dev": "tsx watch server.ts",
+    "build": "cp server.ts src/server.ts && tsc",
     "start": "node dist/server.js"
   },
   "dependencies": {
@@ -24,4 +24,4 @@
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   }
-}
+  }
