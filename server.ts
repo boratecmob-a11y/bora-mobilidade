@@ -348,5 +348,75 @@ app.post("/api/rides/:id/cancel", auth, async (req, res) => {
   res.json(await prisma.ride.update({ where: { id: ride.id }, data: { status: RideStatus.CANCELLED } }));
 });
 
+// CHAT DA CORRIDA
+app.get("/api/rides/:id/messages", auth, async (req, res) => {
+  const ride = await prisma.ride.findUnique({
+    where: { id: req.params.id },
+    include: { driver: true }
+  });
+
+  if (!ride) return res.status(404).json({ error: "Corrida não encontrada" });
+
+  const uid = (req as any).user.id;
+  if (ride.passengerId !== uid && ride.driver?.userId !== uid) {
+    return res.status(403).json({ error: "Sem acesso a esta conversa" });
+  }
+
+  const messages = await prisma.message.findMany({
+    where: { rideId: ride.id },
+    orderBy: { createdAt: "asc" },
+    include: {
+      sender: {
+        select: { id: true, name: true, role: true }
+      }
+    }
+  });
+
+  res.json(messages);
+});
+
+app.post("/api/rides/:id/messages", auth, async (req, res) => {
+  const ride = await prisma.ride.findUnique({
+    where: { id: req.params.id },
+    include: { driver: true }
+  });
+
+  if (!ride) return res.status(404).json({ error: "Corrida não encontrada" });
+
+  const uid = (req as any).user.id;
+  if (ride.passengerId !== uid && ride.driver?.userId !== uid) {
+    return res.status(403).json({ error: "Sem acesso a esta conversa" });
+  }
+
+  if ([RideStatus.COMPLETED, RideStatus.CANCELLED].includes(ride.status)) {
+    return res.status(409).json({ error: "O chat desta corrida está encerrado" });
+  }
+
+  const content = String(req.body?.content || "").trim();
+
+  if (!content) {
+    return res.status(400).json({ error: "Mensagem vazia" });
+  }
+
+  if (content.length > 1000) {
+    return res.status(400).json({ error: "Mensagem muito longa" });
+  }
+
+  const message = await prisma.message.create({
+    data: {
+      rideId: ride.id,
+      senderId: uid,
+      content
+    },
+    include: {
+      sender: {
+        select: { id: true, name: true, role: true }
+      }
+    }
+  });
+
+  res.status(201).json(message);
+});
+
 const port = Number(process.env.PORT || 3000);
 app.listen(port, () => console.log("BORA Backend v2.2 Asaas rodando na porta " + port));

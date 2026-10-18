@@ -39,6 +39,7 @@ model User {
 
   driver          Driver?
   passengerRides  Ride[]   @relation("PassengerRides")
+  messages        Message[] @relation("MessageSender")
 }
 
 model Driver {
@@ -84,4 +85,19 @@ model Ride {
 
   @@index([status, vehicleType, driverId])
   @@index([passengerId, createdAt])
+  messages         Message[]
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  rideId    String
+  senderId  String
+  content   String
+  createdAt DateTime @default(now())
+
+  ride   Ride @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  sender User @relation("MessageSender", fields: [senderId], references: [id])
+
+  @@index([rideId, createdAt])
+  @@index([senderId, createdAt])
 }
