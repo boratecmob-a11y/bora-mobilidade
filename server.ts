@@ -143,7 +143,8 @@ app.post("/api/payments/checkout/:rideId", auth, async (req, res) => {
 
 app.post("/api/payments/webhook", async (req, res) => {
   const expected = process.env.ASAAS_WEBHOOK_TOKEN;
-  if (expected && req.headers["asaas-access-token"] !== expected) return res.sendStatus(401);
+  if (!expected) return res.status(503).json({ error: "Webhook Asaas não configurado" });
+  if (req.headers["asaas-access-token"] !== expected) return res.sendStatus(401);
 
   try {
     const event = String(req.body?.event || "");
@@ -172,8 +173,9 @@ app.post("/api/payments/webhook", async (req, res) => {
     }
 
     return res.sendStatus(200);
-  } catch {
-    return res.sendStatus(200);
+  } catch (e) {
+    console.error("Erro ao processar webhook Asaas:", e);
+    return res.sendStatus(500);
   }
 });
 
@@ -265,13 +267,46 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
 }
 
 function fareFor(distanceKm: number) {
-  const base = Number(process.env.BORA_BASE_FARE || 5);
-  const perKm = Number(process.env.BORA_PRICE_PER_KM || 2);
+  const base = Number(process.env.BORA_BASE_FARE || 1.90);
+  const perKm = Number(process.env.BORA_PRICE_PER_KM || 1.35);
   const avgSpeed = Number(process.env.BORA_AVG_SPEED_KMH || 30);
   const minutes = (distanceKm / Math.max(avgSpeed, 1)) * 60;
-  const perMinute = Number(process.env.BORA_PRICE_PER_MINUTE || 0.35);
-  const fare = base + distanceKm * perKm + minutes * perMinute;
-  return { distanceKm: Number(distanceKm.toFixed(2)), durationMin: Math.max(1, Math.round(minutes)), estimatedFare: Number(fare.toFixed(2)) };
+  const perMinute = Number(process.env.BORA_PRICE_PER_MINUTE || 0.27);
+
+  // Horário local de Goiânia, incluindo mudanças oficiais de fuso.
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Sao_Paulo",
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(new Date());
+
+  const part = (type: string) =>
+    parts.find(p => p.type === type)?.value || "";
+
+  const weekday = part("weekday");
+  const hour = Number(part("hour"));
+  const minute = Number(part("minute"));
+  const timeOfDay = hour * 60 + minute;
+  const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(weekday);
+
+  let dynamicPercent = 0;
+  if (isWeekday && timeOfDay >= 360 && timeOfDay < 540) {
+    dynamicPercent = 15;
+  } else if (isWeekday && timeOfDay >= 1020 && timeOfDay < 1200) {
+    dynamicPercent = 20;
+  }
+
+  const normalFare = base + distanceKm * perKm + minutes * perMinute;
+  const fare = normalFare * (1 + dynamicPercent / 100);
+
+  return {
+    distanceKm: Number(distanceKm.toFixed(2)),
+    durationMin: Math.max(1, Math.round(minutes)),
+    dynamicPercent,
+    estimatedFare: Number(fare.toFixed(2))
+  };
 }
 
 app.get("/api/rides/estimate", auth, async (req, res) => {
@@ -288,7 +323,7 @@ app.post("/api/rides", auth, async (req, res) => {
   if (![VehicleType.CAR, VehicleType.MOTO].includes(vehicleType)) return res.status(400).json({ error: "Tipo de veículo obrigatório. Use CAR ou MOTO" });
   const quote = fareFor(haversineKm(originLat, originLng, destinationLat, destinationLng));
   const estimatedFare = quote.estimatedFare;
-  const commission = Math.min(BORA_FIXED_COMMISSION, estimatedFare);
+  const commission = Math.min(estimatedFare <= 20 ? 1 : 2, estimatedFare);
   const payout = Number((estimatedFare - commission).toFixed(2));
   const ride = await prisma.ride.create({
     data: {
@@ -304,7 +339,7 @@ app.post("/api/rides", auth, async (req, res) => {
       status: RideStatus.SEARCHING_DRIVER
     }
   });
-  res.status(201).json({ ...ride, distanceKm: quote.distanceKm, durationMin: quote.durationMin });
+  res.status(201).json({ ...ride, distanceKm: quote.distanceKm, durationMin: quote.durationMin, dynamicPercent: quote.dynamicPercent });
 });
 
 app.get("/api/rides/:id", auth, async (req, res) => {

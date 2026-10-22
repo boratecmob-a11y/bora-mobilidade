@@ -17,11 +17,11 @@ services:
       - key: BORA_COMMISSION_PERCENT
         value: "20"
       - key: BORA_BASE_FARE
-        value: "5"
+        value: "1.90"
       - key: BORA_PRICE_PER_KM
-        value: "2"
+        value: "1.35"
       - key: BORA_PRICE_PER_MINUTE
-        value: "0.35"
+        value: "0.27"
       - key: BORA_AVG_SPEED_KMH
         value: "30"
       - key: MP_APP_ID
