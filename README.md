@@ -28,7 +28,6 @@ A aceitação usa uma atualização condicional para reduzir o risco de dois mot
 
 
 ### Pagamentos v2.1
-Configure `MP_APP_ID`, `MP_CLIENT_SECRET`, `MP_REDIRECT_URI` e `MP_NOTIFICATION_URL` no `.env`. O webhook deve apontar para uma URL HTTPS pública. Para testes, use as contas de teste do Mercado Pago.
 
 
 ## Regras iniciais da BORA

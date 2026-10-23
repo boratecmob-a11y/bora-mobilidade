@@ -80,6 +80,8 @@ model Ride {
   updatedAt        DateTime    @updatedAt
 
   paymentStatus    String      @default("NOT_PAID")
+  paymentMethod    String?
+  paymentConfirmedAt DateTime?
   asaasPaymentId   String?
   asaasCustomerId  String?
 

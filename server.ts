@@ -152,7 +152,7 @@ app.post("/api/payments/webhook", async (req, res) => {
     const paymentId = String(payment?.id || "");
     const rideId = String(payment?.externalReference || "");
 
-    if (!paymentId) return res.sendStatus(200);
+    if (!paymentId || !rideId) return res.sendStatus(200);
 
     const statusMap: Record<string, string> = {
       PAYMENT_CREATED: "PENDING",
@@ -165,17 +165,229 @@ app.post("/api/payments/webhook", async (req, res) => {
       PAYMENT_CREDIT_CARD_CAPTURE_REFUSED: "REFUSED"
     };
 
-    if (rideId && statusMap[event]) {
-      await prisma.ride.updateMany({
-        where: { id: rideId, OR: [{ asaasPaymentId: paymentId }, { asaasPaymentId: null }] },
-        data: { asaasPaymentId: paymentId, paymentStatus: statusMap[event] }
-      });
+    const newStatus = statusMap[event];
+    if (!newStatus) return res.sendStatus(200);
+
+    const confirmed = newStatus === "CONFIRMED" || newStatus === "RECEIVED";
+    const updateData: any = {
+      paymentStatus: newStatus
+    };
+
+    if (confirmed) {
+      updateData.paymentConfirmedAt = new Date();
     }
+
+    const billingType = String(payment?.billingType || "");
+    if (["PIX", "CREDIT_CARD", "DEBIT_CARD"].includes(billingType)) {
+      updateData.paymentMethod = billingType;
+    }
+
+    // Nunca associa uma cobrança a uma corrida sem correspondência exata.
+    await prisma.ride.updateMany({
+      where: {
+        id: rideId,
+        asaasPaymentId: paymentId
+      },
+      data: updateData
+    });
 
     return res.sendStatus(200);
   } catch (e) {
     console.error("Erro ao processar webhook Asaas:", e);
     return res.sendStatus(500);
+  }
+});
+
+app.post("/api/payments/pix/:rideId", auth, async (req, res) => {
+  if (!role(req, Role.DRIVER)) {
+    return res.status(403).json({ error: "Apenas o motorista da corrida pode gerar o Pix" });
+  }
+  if (!asaasConfigured()) {
+    return res.status(503).json({ error: "Asaas ainda não configurado no servidor" });
+  }
+
+  try {
+    const ride = await prisma.ride.findUnique({
+      where: { id: req.params.rideId },
+      include: { passenger: true, driver: true }
+    });
+
+    if (!ride) return res.status(404).json({ error: "Corrida não encontrada" });
+    if (ride.driver?.userId !== (req as any).user.id) {
+      return res.status(403).json({ error: "Você não é o motorista desta corrida" });
+    }
+    if (ride.status !== RideStatus.COMPLETED) {
+      return res.status(409).json({ error: "O Pix só pode ser gerado após finalizar a corrida" });
+    }
+    if (ride.paymentStatus === "RECEIVED" || ride.paymentStatus === "CONFIRMED") {
+      return res.status(409).json({ error: "Esta corrida já tem pagamento confirmado" });
+    }
+
+    const pixResult: any = await prisma.$transaction(async (tx) => {
+      // Serializa a criação do Pix por corrida no PostgreSQL.
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${ride.id}))`;
+
+      // Rele a corrida após obter o bloqueio: não confiar no estado antigo.
+      const currentRide = await tx.ride.findUnique({
+        where: { id: ride.id },
+        include: { passenger: true, driver: true }
+      });
+
+      if (!currentRide) {
+        return { errorStatus: 404, error: "Corrida não encontrada" };
+      }
+
+      if (currentRide.driver?.userId !== (req as any).user.id) {
+        return { errorStatus: 403, error: "Você não é o motorista desta corrida" };
+      }
+
+      if (currentRide.status !== RideStatus.COMPLETED) {
+        return { errorStatus: 409, error: "O Pix só pode ser gerado após finalizar a corrida" };
+      }
+
+      if (currentRide.paymentStatus === "RECEIVED" ||
+          currentRide.paymentStatus === "CONFIRMED") {
+        return { errorStatus: 409, error: "Esta corrida já tem pagamento confirmado" };
+      }
+
+      let paymentId = currentRide.asaasPaymentId;
+
+      if (paymentId && currentRide.paymentMethod !== "PIX") {
+        return {
+          errorStatus: 409,
+          error: "Esta corrida já possui uma cobrança de outro tipo. Não será criada outra cobrança automaticamente."
+        };
+      }
+
+      if (!paymentId) {
+        // Antes de criar, procura uma cobrança Pix já registrada no Asaas.
+        let lookupResponse: Response;
+        let lookup: any;
+
+        try {
+          lookupResponse = await asaasRequest(
+            `/v3/payments?externalReference=${encodeURIComponent(currentRide.id)}&limit=10`
+          );
+          lookup = await lookupResponse.json();
+        } catch (error) {
+          console.error("Não foi possível consultar cobranças existentes no Asaas:", error);
+          return {
+            errorStatus: 502,
+            error: "Não foi possível verificar se já existe uma cobrança Pix. Nenhuma nova cobrança foi criada."
+          };
+        }
+
+        if (!lookupResponse.ok || !Array.isArray(lookup?.data)) {
+          console.error("Consulta de cobranças no Asaas falhou:", lookup?.errors || lookupResponse.status);
+          return {
+            errorStatus: 502,
+            error: "Não foi possível verificar cobranças anteriores no Asaas. Tente novamente mais tarde."
+          };
+        }
+
+        const existingPix = lookup.data.find((item: any) =>
+          item?.billingType === "PIX" &&
+          Number(item?.value) === Number(currentRide.estimatedFare.toFixed(2)) &&
+          item?.id &&
+          !["DELETED", "REFUNDED", "PARTIALLY_REFUNDED"].includes(String(item?.status || ""))
+        );
+
+        if (existingPix) {
+          paymentId = String(existingPix.id);
+
+          await tx.ride.update({
+            where: { id: currentRide.id },
+            data: {
+              asaasPaymentId: paymentId,
+              asaasCustomerId: String(existingPix.customer || currentRide.asaasCustomerId || ""),
+              paymentMethod: "PIX",
+              paymentStatus: String(existingPix.status || "PENDING"),
+              paymentConfirmedAt: null
+            }
+          });
+        }
+
+        if (!paymentId) {
+          const customer = await getOrCreateAsaasCustomer(currentRide.passenger);
+        const dueDate = new Date(Date.now() + 24 * 60 * 60 * 1000)
+          .toISOString().slice(0, 10);
+
+        const createdResponse = await asaasRequest("/v3/payments", {
+          method: "POST",
+          body: JSON.stringify({
+            customer: customer.id,
+            billingType: "PIX",
+            value: Number(currentRide.estimatedFare.toFixed(2)),
+            dueDate,
+            description: `Corrida BORA ${currentRide.id}`,
+            externalReference: currentRide.id
+          })
+        });
+
+        const created: any = await createdResponse.json();
+
+        if (!createdResponse.ok || !created.id) {
+          console.error(
+            "Falha ao criar cobrança Pix no Asaas:",
+            created?.errors || created?.message || createdResponse.status
+          );
+          return {
+            errorStatus: 502,
+            error: "Não foi possível confirmar a criação da cobrança Pix. Consulte o Asaas antes de tentar novamente."
+          };
+        }
+
+        paymentId = String(created.id);
+
+        await tx.ride.update({
+          where: { id: currentRide.id },
+          data: {
+            asaasPaymentId: paymentId,
+            asaasCustomerId: String(customer.id),
+            paymentMethod: "PIX",
+            paymentStatus: String(created.status || "PENDING"),
+            paymentConfirmedAt: null
+          }
+        });
+        }
+      }
+
+      return { paymentId };
+    }, { maxWait: 10000, timeout: 60000 });
+
+    if (pixResult.errorStatus) {
+      return res.status(pixResult.errorStatus).json({ error: pixResult.error });
+    }
+
+    const paymentId = String(pixResult.paymentId);
+
+    const qrResponse = await asaasRequest(
+      `/v3/payments/${encodeURIComponent(paymentId)}/pixQrCode`
+    );
+    const qr: any = await qrResponse.json();
+
+    if (!qrResponse.ok || !qr.payload) {
+      console.error("Falha ao consultar QR Code Pix no Asaas:", qr?.errors || qr?.message || qrResponse.status);
+      return res.status(502).json({
+        error: "A cobrança existe, mas não foi possível obter o QR Code Pix. Tente consultar novamente."
+      });
+    }
+
+    return res.json({
+      rideId: ride.id,
+      paymentId,
+      paymentMethod: "PIX",
+      status: String((await prisma.ride.findUnique({ where: { id: ride.id }, select: { paymentStatus: true } }))?.paymentStatus || "PENDING"),
+      value: Number(ride.estimatedFare.toFixed(2)),
+      encodedImage: qr.encodedImage,
+      payload: qr.payload,
+      expirationDate: qr.expirationDate
+    });
+  } catch (error) {
+    console.error("Erro ao gerar Pix da corrida:", error);
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Erro interno ao gerar Pix"
+    });
   }
 });
 
@@ -225,6 +437,7 @@ app.post("/api/auth/login", async (req, res) => {
   if (!u || !(await bcrypt.compare(req.body.password, u.passwordHash))) return res.status(401).json({ error: "Login inválido" });
   res.json({ id: u.id, name: u.name, role: u.role, token: makeToken(u) });
 });
+
 
 app.get("/api/drivers/daily-balance", auth, async (req, res) => {
   if (!role(req, Role.DRIVER)) {
