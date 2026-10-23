@@ -226,6 +226,66 @@ app.post("/api/auth/login", async (req, res) => {
   res.json({ id: u.id, name: u.name, role: u.role, token: makeToken(u) });
 });
 
+app.get("/api/drivers/daily-balance", auth, async (req, res) => {
+  if (!role(req, Role.DRIVER)) {
+    return res.status(403).json({ error: "Apenas motoristas" });
+  }
+
+  try {
+    const driver = await prisma.driver.findUnique({
+      where: { userId: (req as any).user.id }
+    });
+    if (!driver) {
+      return res.status(404).json({ error: "Motorista não encontrado" });
+    }
+
+    // Dia corrente em Brasília (UTC-3).
+    const now = new Date();
+    const day = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/Sao_Paulo",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(now);
+
+    const start = new Date(`${day}T03:00:00.000Z`);
+    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
+
+    const rides = await prisma.ride.findMany({
+      where: {
+        driverId: driver.id,
+        status: RideStatus.COMPLETED,
+        createdAt: { gte: start, lt: end }
+      },
+      select: {
+        id: true,
+        createdAt: true,
+        estimatedFare: true,
+        commission: true,
+        driverPayout: true,
+        paymentStatus: true
+      },
+      orderBy: { createdAt: "desc" }
+    });
+
+    const gross = rides.reduce((sum, r) => sum + r.estimatedFare, 0);
+    const commission = rides.reduce((sum, r) => sum + r.commission, 0);
+    const net = rides.reduce((sum, r) => sum + r.driverPayout, 0);
+
+    return res.json({
+      date: day,
+      ridesCount: rides.length,
+      gross: Number(gross.toFixed(2)),
+      commission: Number(commission.toFixed(2)),
+      net: Number(net.toFixed(2)),
+      rides
+    });
+  } catch (error) {
+    console.error("Erro ao consultar saldo diário:", error);
+    return res.status(500).json({ error: "Não foi possível consultar o saldo do dia" });
+  }
+});
+
 app.post("/api/drivers/online", auth, async (req, res) => {
   if (!role(req, Role.DRIVER)) return res.status(403).json({ error: "Apenas motoristas" });
   const data: any = { online: Boolean(req.body.online) };
