@@ -3,13 +3,15 @@ import cors from "cors";
 import dotenv from "dotenv";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { v2 as cloudinary } from "cloudinary";
 import { PrismaClient, Role, RideStatus, VehicleType } from "@prisma/client";
 
 dotenv.config();
+cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, api_secret: process.env.CLOUDINARY_API_SECRET, secure: true });
 const app = express();
 const prisma = new PrismaClient();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "5mb" }));
 
 const secret = process.env.JWT_SECRET || "development-secret";
 const BORA_FIXED_COMMISSION = Number(process.env.BORA_FIXED_COMMISSION || 1);
@@ -46,6 +48,23 @@ async function asaasRequest(path: string, init: RequestInit = {}) {
   headers.set("accept", "application/json");
   if (init.body && !headers.has("content-type")) headers.set("content-type", "application/json");
   return fetch(`${ASAAS_API_URL}${path}`, { ...init, headers });
+}
+
+function isValidCPF(value: unknown): boolean {
+  const cpf = String(value || "").replace(/\D/g, "");
+  if (!/^\d{11}$/.test(cpf) || /^(\d)\1{10}$/.test(cpf)) return false;
+
+  let sum = 0;
+  for (let i = 0; i < 9; i++) sum += Number(cpf[i]) * (10 - i);
+  let digit = (sum * 10) % 11;
+  if (digit === 10) digit = 0;
+  if (digit !== Number(cpf[9])) return false;
+
+  sum = 0;
+  for (let i = 0; i < 10; i++) sum += Number(cpf[i]) * (11 - i);
+  digit = (sum * 10) % 11;
+  if (digit === 10) digit = 0;
+  return digit === Number(cpf[10]);
 }
 
 function normalizeDocument(value: unknown) {
@@ -413,22 +432,90 @@ app.get("/api/payments/status/:rideId", auth, async (req, res) => {
 });
 
 app.post("/api/auth/register", async (req, res) => {
-  const { name, email, password, role: r, cpfCnpj } = req.body;
-  if (!name || !email || !password || !["PASSENGER", "DRIVER"].includes(r)) return res.status(400).json({ error: "Dados inválidos" });
+  const { name, email, password, role: r, cpfCnpj, profilePhoto } = req.body;
+  const normalizedCpf = normalizeDocument(cpfCnpj);
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+
+  if (!name || !normalizedEmail || !password || !["PASSENGER", "DRIVER"].includes(r)) {
+    return res.status(400).json({ error: "Dados inválidos" });
+  }
+  if (!isValidCPF(normalizedCpf)) {
+    return res.status(400).json({ error: "Informe um CPF válido" });
+  }
+  if (r === "PASSENGER") {
+    if (
+      typeof profilePhoto !== "string" ||
+      profilePhoto.length > 4500000 ||
+      !/^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(profilePhoto)
+    ) {
+      return res.status(400).json({ error: "Selecione uma foto válida para o perfil" });
+    }
+    if (
+      !process.env.CLOUDINARY_CLOUD_NAME ||
+      !process.env.CLOUDINARY_API_KEY ||
+      !process.env.CLOUDINARY_API_SECRET
+    ) {
+      return res.status(503).json({ error: "Armazenamento de fotos ainda não configurado" });
+    }
+  }
+
+  let uploaded = null;
   try {
+    const existingEmail = await prisma.user.findUnique({
+      where: { email: normalizedEmail }
+    });
+    if (existingEmail) {
+      return res.status(409).json({ error: "Este e-mail já está cadastrado" });
+    }
+
+    const existingCpf = await prisma.user.findFirst({
+      where: { cpfCnpj: normalizedCpf }
+    });
+    if (existingCpf) {
+      return res.status(409).json({ error: "Este CPF já está cadastrado" });
+    }
+
+    if (r === "PASSENGER") {
+      uploaded = await cloudinary.uploader.upload(profilePhoto, {
+        folder: "bora/profile",
+        resource_type: "image",
+        allowed_formats: ["jpg", "jpeg", "png", "webp"],
+        transformation: [{ width: 512, height: 512, crop: "fill", gravity: "face" }]
+      });
+    }
+
     const u = await prisma.user.create({
       data: {
-        name,
-        email,
-        passwordHash: await bcrypt.hash(password, 10),
+        name: String(name).trim(),
+        email: normalizedEmail,
+        passwordHash: await bcrypt.hash(String(password), 10),
         role: r,
-        cpfCnpj: cpfCnpj ? normalizeDocument(cpfCnpj) : null
+        cpfCnpj: normalizedCpf,
+        profilePhotoUrl: uploaded ? uploaded.secure_url : null,
+        profilePhotoPublicId: uploaded ? uploaded.public_id : null
       }
     });
-    if (r === "DRIVER") await prisma.driver.create({ data: { userId: u.id } });
-    res.status(201).json({ id: u.id, name: u.name, email: u.email, role: u.role, token: makeToken(u) });
-  } catch {
-    res.status(400).json({ error: "E-mail pode já estar cadastrado" });
+
+    if (r === "DRIVER") {
+      await prisma.driver.create({ data: { userId: u.id } });
+    }
+
+    return res.status(201).json({
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      role: u.role,
+      profilePhotoUrl: u.profilePhotoUrl,
+      token: makeToken(u)
+    });
+  } catch (error) {
+    if (uploaded?.public_id) {
+      try {
+        await cloudinary.uploader.destroy(uploaded.public_id);
+      } catch {}
+    }
+    console.error("Falha no cadastro:", error);
+    return res.status(400).json({ error: "Não foi possível concluir o cadastro" });
   }
 });
 
@@ -526,7 +613,7 @@ app.get("/api/rides/available", auth, async (req, res) => {
     where: { status: RideStatus.SEARCHING_DRIVER, driverId: null, vehicleType: d.vehicleType },
     orderBy: { createdAt: "asc" },
     take: 20,
-    include: { passenger: { select: { name: true } } }
+    include: { passenger: { select: { name: true, profilePhotoUrl: true } }, stops: { orderBy: { position: "asc" } } }
   });
   res.json(rides);
 });
@@ -539,7 +626,7 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function fareFor(distanceKm: number) {
+function fareFor(distanceKm: number, vehicleType: VehicleType = VehicleType.CAR) {
   const base = Number(process.env.BORA_BASE_FARE || 1.90);
   const perKm = Number(process.env.BORA_PRICE_PER_KM || 1.35);
   const avgSpeed = Number(process.env.BORA_AVG_SPEED_KMH || 30);
@@ -572,7 +659,10 @@ function fareFor(distanceKm: number) {
   }
 
   const normalFare = base + distanceKm * perKm + minutes * perMinute;
-  const fare = normalFare * (1 + dynamicPercent / 100);
+  const fareWithDynamic = normalFare * (1 + dynamicPercent / 100);
+  const fare = vehicleType === VehicleType.MOTO
+    ? fareWithDynamic * 0.90
+    : fareWithDynamic;
 
   return {
     distanceKm: Number(distanceKm.toFixed(2)),
@@ -585,19 +675,29 @@ function fareFor(distanceKm: number) {
 app.get("/api/rides/estimate", auth, async (req, res) => {
   if (!role(req, Role.PASSENGER)) return res.status(403).json({ error: "Apenas passageiros" });
   const originLat = Number(req.query.originLat), originLng = Number(req.query.originLng), destinationLat = Number(req.query.destinationLat), destinationLng = Number(req.query.destinationLng);
+  const vehicleType = String(req.query.vehicleType || VehicleType.CAR);
+  if (![VehicleType.CAR, VehicleType.MOTO].includes(vehicleType as VehicleType)) return res.status(400).json({ error: "Tipo de veículo inválido. Use CAR ou MOTO" });
   if ([originLat, originLng, destinationLat, destinationLng].some(v => !Number.isFinite(v))) return res.status(400).json({ error: "Coordenadas inválidas" });
-  res.json(fareFor(haversineKm(originLat, originLng, destinationLat, destinationLng)));
+  const stopCount = Number(req.query.stopCount || 0);
+  if (!Number.isInteger(stopCount) || stopCount < 0 || stopCount > 10) return res.status(400).json({ error: "Informe de 0 a 10 paradas" });
+  const quote = fareFor(haversineKm(originLat, originLng, destinationLat, destinationLng), vehicleType as VehicleType);
+  const stopsFee = Number((stopCount * 5).toFixed(2));
+  res.json({ ...quote, baseEstimatedFare: quote.estimatedFare, stopsCount: stopCount, stopsFee, estimatedFare: Number((quote.estimatedFare + stopsFee).toFixed(2)) });
 });
 
 app.post("/api/rides", auth, async (req, res) => {
   if (!role(req, Role.PASSENGER)) return res.status(403).json({ error: "Apenas passageiros" });
-  const { originLat, originLng, destinationLat, destinationLng, vehicleType } = req.body;
+  const { originLat, originLng, destinationLat, destinationLng, vehicleType, stops = [] } = req.body;
   if ([originLat, originLng, destinationLat, destinationLng].some(v => typeof v !== "number")) return res.status(400).json({ error: "Dados da corrida inválidos" });
+  if (!Array.isArray(stops) || stops.length > 10 || stops.some((stop: any) => !stop || typeof stop.latitude !== "number" || typeof stop.longitude !== "number" || !Number.isFinite(stop.latitude) || !Number.isFinite(stop.longitude))) return res.status(400).json({ error: "Paradas inválidas. Informe até 10 paradas com coordenadas válidas" });
   if (![VehicleType.CAR, VehicleType.MOTO].includes(vehicleType)) return res.status(400).json({ error: "Tipo de veículo obrigatório. Use CAR ou MOTO" });
-  const quote = fareFor(haversineKm(originLat, originLng, destinationLat, destinationLng));
-  const estimatedFare = quote.estimatedFare;
-  const commission = Math.min(estimatedFare <= 20 ? 1 : 2, estimatedFare);
-  const payout = Number((estimatedFare - commission).toFixed(2));
+  const quote = fareFor(haversineKm(originLat, originLng, destinationLat, destinationLng), vehicleType as VehicleType);
+  const baseFare = quote.estimatedFare;
+  const stopsFee = Number((stops.length * 5).toFixed(2));
+  const estimatedFare = Number((baseFare + stopsFee).toFixed(2));
+  const baseCommission = Math.min(baseFare <= 20 ? 1 : 2, baseFare);
+  const commission = Number((baseCommission + stops.length).toFixed(2));
+  const payout = Number((baseFare - baseCommission + stops.length * 4).toFixed(2));
   const ride = await prisma.ride.create({
     data: {
       passengerId: (req as any).user.id,
@@ -609,14 +709,15 @@ app.post("/api/rides", auth, async (req, res) => {
       estimatedFare,
       commission,
       driverPayout: payout,
-      status: RideStatus.SEARCHING_DRIVER
+      status: RideStatus.SEARCHING_DRIVER,
+      stops: { create: stops.map((stop: any, index: number) => ({ latitude: stop.latitude, longitude: stop.longitude, address: typeof stop.address === "string" ? stop.address : null, position: index + 1 })) }
     }
   });
   res.status(201).json({ ...ride, distanceKm: quote.distanceKm, durationMin: quote.durationMin, dynamicPercent: quote.dynamicPercent });
 });
 
 app.get("/api/rides/:id", auth, async (req, res) => {
-  const ride = await prisma.ride.findUnique({ where: { id: req.params.id }, include: { passenger: true, driver: { include: { user: true } } } });
+  const ride = await prisma.ride.findUnique({ where: { id: req.params.id }, include: { passenger: true, driver: { include: { user: true } }, stops: { orderBy: { position: "asc" } } } });
   if (!ride) return res.status(404).json({ error: "Corrida não encontrada" });
   const uid = (req as any).user.id;
   if (ride.passengerId !== uid && ride.driver?.userId !== uid) return res.status(403).json({ error: "Sem acesso a esta corrida" });

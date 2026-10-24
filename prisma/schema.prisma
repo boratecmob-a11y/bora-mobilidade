@@ -35,6 +35,8 @@ model User {
   passwordHash    String
   role            Role
   cpfCnpj         String?
+  profilePhotoUrl      String?
+  profilePhotoPublicId String?
   createdAt       DateTime @default(now())
 
   driver          Driver?
@@ -88,6 +90,7 @@ model Ride {
   @@index([status, vehicleType, driverId])
   @@index([passengerId, createdAt])
   messages         Message[]
+  stops            RideStop[]
 }
 
 model Message {
@@ -102,4 +105,19 @@ model Message {
 
   @@index([rideId, createdAt])
   @@index([senderId, createdAt])
+}
+
+model RideStop {
+  id        String   @id @default(cuid())
+  rideId    String
+  address   String?
+  latitude  Float
+  longitude Float
+  position  Int
+  createdAt DateTime @default(now())
+
+  ride Ride @relation(fields: [rideId], references: [id], onDelete: Cascade)
+
+  @@unique([rideId, position])
+  @@index([rideId, position])
 }
