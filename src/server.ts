@@ -522,7 +522,7 @@ app.post("/api/auth/register", async (req, res) => {
 app.post("/api/auth/login", async (req, res) => {
   const u = await prisma.user.findUnique({ where: { email: req.body.email } });
   if (!u || !(await bcrypt.compare(req.body.password, u.passwordHash))) return res.status(401).json({ error: "Login inválido" });
-  res.json({ id: u.id, name: u.name, role: u.role, token: makeToken(u) });
+  res.json({ id: u.id, name: u.name, role: u.role, profilePhotoUrl: u.profilePhotoUrl, token: makeToken(u) });
 });
 
 
