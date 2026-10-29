@@ -520,9 +520,61 @@ app.post("/api/auth/register", async (req, res) => {
 });
 
 app.post("/api/auth/login", async (req, res) => {
-  const u = await prisma.user.findUnique({ where: { email: req.body.email } });
-  if (!u || !(await bcrypt.compare(req.body.password, u.passwordHash))) return res.status(401).json({ error: "Login inválido" });
-  res.json({ id: u.id, name: u.name, role: u.role, profilePhotoUrl: u.profilePhotoUrl, token: makeToken(u) });
+  const normalizedEmail = String(req.body.email || "").trim().toLowerCase();
+  const u = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+  if (!u || !(await bcrypt.compare(String(req.body.password || ""), u.passwordHash))) {
+    return res.status(401).json({ error: "Login inválido" });
+  }
+
+  let activeRole = u.role;
+  if (req.body.role === Role.DRIVER) {
+    const driver = await prisma.driver.findUnique({ where: { userId: u.id } });
+    if (!driver) return res.status(403).json({ error: "Esta conta ainda não tem perfil de motorista. Ative o perfil primeiro." });
+    activeRole = Role.DRIVER;
+  } else if (req.body.role && req.body.role !== u.role) {
+    return res.status(403).json({ error: "Perfil solicitado indisponível para esta conta" });
+  }
+
+  res.json({ id: u.id, name: u.name, role: activeRole, profilePhotoUrl: u.profilePhotoUrl, token: makeToken({ ...u, role: activeRole }) });
+});
+
+app.post("/api/auth/activate-driver", async (req, res) => {
+  const normalizedEmail = String(req.body.email || "").trim().toLowerCase();
+  const normalizedCpf = normalizeDocument(req.body.cpfCnpj);
+  const vehicleType = req.body.vehicleType;
+
+  if (!normalizedEmail || !req.body.password || !isValidCPF(normalizedCpf) || ![VehicleType.CAR, VehicleType.MOTO].includes(vehicleType)) {
+    return res.status(400).json({ error: "Informe e-mail, senha, CPF válido e tipo de veículo" });
+  }
+
+  try {
+    const u = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+    if (!u) return res.status(404).json({ error: "Conta não encontrada" });
+    if (!(await bcrypt.compare(String(req.body.password), u.passwordHash))) {
+      return res.status(401).json({ error: "Senha incorreta" });
+    }
+    if (u.role === Role.ADMIN || normalizeDocument(u.cpfCnpj) !== normalizedCpf) {
+      return res.status(403).json({ error: "Não foi possível confirmar os dados desta conta" });
+    }
+
+    await prisma.driver.upsert({
+      where: { userId: u.id },
+      update: { vehicleType },
+      create: { userId: u.id, vehicleType }
+    });
+
+    return res.json({
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      role: Role.DRIVER,
+      profilePhotoUrl: u.profilePhotoUrl,
+      token: makeToken({ ...u, role: Role.DRIVER })
+    });
+  } catch (error) {
+    console.error("Falha ao ativar perfil de motorista:", error);
+    return res.status(500).json({ error: "Não foi possível ativar o perfil de motorista" });
+  }
 });
 
 
