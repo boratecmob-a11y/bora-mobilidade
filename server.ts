@@ -1,3 +1,4 @@
+import { createHash, randomInt } from "crypto";
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
@@ -536,6 +537,126 @@ app.post("/api/auth/login", async (req, res) => {
   }
 
   res.json({ id: u.id, name: u.name, role: activeRole, profilePhotoUrl: u.profilePhotoUrl, token: makeToken({ ...u, role: activeRole }) });
+});
+
+
+app.post("/api/auth/forgot-password", async (req, res) => {
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const mensagem = "Se a conta de motorista existir, enviaremos um código de recuperação.";
+
+  try {
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) return res.json({ message: mensagem });
+
+    const driver = await prisma.driver.findUnique({ where: { userId: user.id } });
+    if (!driver) return res.json({ message: mensagem });
+
+    const anterior = await prisma.passwordResetToken.findUnique({
+      where: { userId: user.id }
+    });
+
+    if (anterior && Date.now() - anterior.createdAt.getTime() < 60000) {
+      return res.json({ message: mensagem });
+    }
+
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) {
+      console.error("RESEND_API_KEY não configurada.");
+      return res.status(503).json({ error: "Serviço de e-mail temporariamente indisponível." });
+    }
+
+    const codigo = String(randomInt(100000, 1000000));
+    const codeHash = createHash("sha256").update(`${codigo}:${secret}`).digest("hex");
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+    await prisma.passwordResetToken.upsert({
+      where: { userId: user.id },
+      update: { codeHash, expiresAt, attempts: 0, usedAt: null, createdAt: new Date() },
+      create: { userId: user.id, codeHash, expiresAt }
+    });
+
+    const envio = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: "BORA <boratecmob@gmail.com>",
+        to: [user.email],
+        subject: "Código para recuperar sua senha - BORA",
+        html: `<div style="font-family:Arial,sans-serif"><h2>Recuperação de senha BORA</h2><p>Seu código de recuperação é:</p><h1 style="letter-spacing:6px">${codigo}</h1><p>O código expira em 15 minutos. Se você não solicitou esta recuperação, ignore este e-mail.</p></div>`
+      })
+    });
+
+    if (!envio.ok) {
+      const detalhe = await envio.text();
+      console.error("Falha no envio pelo Resend:", detalhe);
+      return res.status(503).json({ error: "Não foi possível enviar o código. Tente novamente mais tarde." });
+    }
+
+    return res.json({ message: mensagem });
+  } catch (error) {
+    console.error("Erro na recuperação de senha:", error);
+    return res.status(500).json({ error: "Não foi possível solicitar a recuperação." });
+  }
+});
+
+app.post("/api/auth/reset-password", async (req, res) => {
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const codigo = String(req.body.code || "").trim();
+  const novaSenha = String(req.body.newPassword || "");
+
+  if (!email || !/^\d{6}$/.test(codigo) || novaSenha.length < 8) {
+    return res.status(400).json({ error: "Informe e-mail, código de seis dígitos e senha com pelo menos 8 caracteres." });
+  }
+
+  try {
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) return res.status(400).json({ error: "Código inválido ou expirado." });
+
+    const driver = await prisma.driver.findUnique({ where: { userId: user.id } });
+    if (!driver) return res.status(400).json({ error: "Código inválido ou expirado." });
+
+    const token = await prisma.passwordResetToken.findUnique({
+      where: { userId: user.id }
+    });
+
+    if (!token || token.usedAt || token.expiresAt.getTime() < Date.now() || token.attempts >= 5) {
+      return res.status(400).json({ error: "Código inválido ou expirado." });
+    }
+
+    const informado = createHash("sha256").update(`${codigo}:${secret}`).digest("hex");
+
+    if (informado !== token.codeHash) {
+      const tentativas = token.attempts + 1;
+      await prisma.passwordResetToken.update({
+        where: { userId: user.id },
+        data: {
+          attempts: tentativas,
+          ...(tentativas >= 5 ? { usedAt: new Date() } : {})
+        }
+      });
+      return res.status(400).json({ error: "Código inválido ou expirado." });
+    }
+
+    const passwordHash = await bcrypt.hash(novaSenha, 10);
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash }
+      }),
+      prisma.passwordResetToken.update({
+        where: { userId: user.id },
+        data: { usedAt: new Date() }
+      })
+    ]);
+
+    return res.json({ message: "Senha alterada com sucesso. Você já pode entrar no BORA." });
+  } catch (error) {
+    console.error("Erro ao redefinir senha:", error);
+    return res.status(500).json({ error: "Não foi possível alterar a senha." });
+  }
 });
 
 app.post("/api/auth/activate-driver", async (req, res) => {

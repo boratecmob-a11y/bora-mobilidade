@@ -42,6 +42,7 @@ model User {
   driver          Driver?
   passengerRides  Ride[]   @relation("PassengerRides")
   messages        Message[] @relation("MessageSender")
+  passwordResetTokens PasswordResetToken[]
 }
 
 model Driver {
@@ -120,4 +121,19 @@ model RideStop {
 
   @@unique([rideId, position])
   @@index([rideId, position])
+}
+
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  codeHash  String
+  expiresAt DateTime
+  attempts  Int      @default(0)
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
 }
