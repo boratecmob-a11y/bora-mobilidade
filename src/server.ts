@@ -542,14 +542,12 @@ app.post("/api/auth/login", async (req, res) => {
 
 app.post("/api/auth/forgot-password", async (req, res) => {
   const email = String(req.body.email || "").trim().toLowerCase();
-  const mensagem = "Se a conta de motorista existir, enviaremos um código de recuperação.";
+  const mensagem = "Se sua conta BORA existir, enviaremos um código de recuperação.";
 
   try {
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) return res.json({ message: mensagem });
 
-    const driver = await prisma.driver.findUnique({ where: { userId: user.id } });
-    if (!driver) return res.json({ message: mensagem });
 
     const anterior = await prisma.passwordResetToken.findUnique({
       where: { userId: user.id }
@@ -615,8 +613,6 @@ app.post("/api/auth/reset-password", async (req, res) => {
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) return res.status(400).json({ error: "Código inválido ou expirado." });
 
-    const driver = await prisma.driver.findUnique({ where: { userId: user.id } });
-    if (!driver) return res.status(400).json({ error: "Código inválido ou expirado." });
 
     const token = await prisma.passwordResetToken.findUnique({
       where: { userId: user.id }
