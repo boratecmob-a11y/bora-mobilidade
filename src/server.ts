@@ -580,7 +580,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        from: "BORA <boratecmob@gmail.com>",
+        from: "BORA <nao-responda@boramobilidadeurbana.com.br>",
         to: [user.email],
         subject: "Código para recuperar sua senha - BORA",
         html: `<div style="font-family:Arial,sans-serif"><h2>Recuperação de senha BORA</h2><p>Seu código de recuperação é:</p><h1 style="letter-spacing:6px">${codigo}</h1><p>O código expira em 15 minutos. Se você não solicitou esta recuperação, ignore este e-mail.</p></div>`
