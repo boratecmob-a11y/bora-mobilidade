@@ -22,14 +22,26 @@ function makeToken(u: { id: string; role: Role }) {
   return jwt.sign({ id: u.id, role: u.role }, secret, { expiresIn: "7d" });
 }
 
-function auth(req: express.Request, res: express.Response, next: express.NextFunction) {
+async function auth(req: express.Request, res: express.Response, next: express.NextFunction) {
   const h = req.headers.authorization;
   if (!h?.startsWith("Bearer ")) return res.status(401).json({ error: "Não autorizado" });
   try {
-    (req as any).user = jwt.verify(h.slice(7), secret);
+    const tokenUser = jwt.verify(h.slice(7), secret) as { id?: string; role?: Role };
+    if (!tokenUser.id) return res.status(401).json({ error: "Token inválido" });
+
+    const user = await prisma.user.findUnique({
+      where: { id: tokenUser.id },
+      select: { id: true, deletedAt: true }
+    });
+
+    if (!user || user.deletedAt) {
+      return res.status(401).json({ error: "Esta conta não está mais ativa." });
+    }
+
+    (req as any).user = tokenUser;
     next();
   } catch {
-    return res.status(401).json({ error: "Token inválido" });
+    return res.status(401).json({ error: "Token inválido ou conta indisponível" });
   }
 }
 
@@ -433,7 +445,7 @@ app.get("/api/payments/status/:rideId", auth, async (req, res) => {
 });
 
 app.post("/api/auth/register", async (req, res) => {
-  const { name, email, password, role: r, cpfCnpj, profilePhoto } = req.body;
+  const { name, email, password, role: r, cpfCnpj, phone, profilePhoto } = req.body;
   const normalizedCpf = normalizeDocument(cpfCnpj);
   const normalizedEmail = String(email || "").trim().toLowerCase();
 
@@ -492,6 +504,7 @@ app.post("/api/auth/register", async (req, res) => {
         passwordHash: await bcrypt.hash(String(password), 10),
         role: r,
         cpfCnpj: normalizedCpf,
+        phone: phone ? String(phone).replace(/\D/g, "") : null,
         profilePhotoUrl: uploaded ? uploaded.secure_url : null,
         profilePhotoPublicId: uploaded ? uploaded.public_id : null
       }
@@ -523,7 +536,7 @@ app.post("/api/auth/register", async (req, res) => {
 app.post("/api/auth/login", async (req, res) => {
   const normalizedEmail = String(req.body.email || "").trim().toLowerCase();
   const u = await prisma.user.findUnique({ where: { email: normalizedEmail } });
-  if (!u || !(await bcrypt.compare(String(req.body.password || ""), u.passwordHash))) {
+  if (!u || u.deletedAt || !(await bcrypt.compare(String(req.body.password || ""), u.passwordHash))) {
     return res.status(401).json({ error: "Login inválido" });
   }
 
@@ -666,13 +679,22 @@ app.post("/api/auth/activate-driver", async (req, res) => {
 
   try {
     const u = await prisma.user.findUnique({ where: { email: normalizedEmail } });
-    if (!u) return res.status(404).json({ error: "Conta não encontrada" });
+    if (!u || u.deletedAt) return res.status(404).json({ error: "Conta não encontrada ou indisponível" });
     if (!(await bcrypt.compare(String(req.body.password), u.passwordHash))) {
       return res.status(401).json({ error: "Senha incorreta" });
     }
     if (u.role === Role.ADMIN || normalizeDocument(u.cpfCnpj) !== normalizedCpf) {
       return res.status(403).json({ error: "Não foi possível confirmar os dados desta conta" });
     }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: u.id },
+      data: {
+        phone: req.body.phone
+          ? String(req.body.phone).replace(/\D/g, "")
+          : u.phone
+      }
+    });
 
     await prisma.driver.upsert({
       where: { userId: u.id },
@@ -682,11 +704,11 @@ app.post("/api/auth/activate-driver", async (req, res) => {
 
     return res.json({
       id: u.id,
-      name: u.name,
-      email: u.email,
+      name: updatedUser.name,
+      email: updatedUser.email,
       role: Role.DRIVER,
-      profilePhotoUrl: u.profilePhotoUrl,
-      token: makeToken({ ...u, role: Role.DRIVER })
+      profilePhotoUrl: updatedUser.profilePhotoUrl,
+      token: makeToken({ ...updatedUser, role: Role.DRIVER })
     });
   } catch (error) {
     console.error("Falha ao ativar perfil de motorista:", error);
@@ -694,6 +716,64 @@ app.post("/api/auth/activate-driver", async (req, res) => {
   }
 });
 
+
+app.get("/api/profile", auth, async (req, res) => {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: (req as any).user.id },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        role: true,
+        profilePhotoUrl: true
+      }
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: "Usuário não encontrado" });
+    }
+
+    return res.json(user);
+  } catch (error) {
+    console.error("Erro ao carregar perfil:", error);
+    return res.status(500).json({ error: "Não foi possível carregar o perfil" });
+  }
+});
+
+app.put("/api/profile", auth, async (req, res) => {
+  try {
+    const name = String(req.body.name || "").trim();
+    const phone = String(req.body.phone || "").replace(/\D/g, "");
+
+    if (name.length < 2 || name.length > 100) {
+      return res.status(400).json({ error: "Informe um nome entre 2 e 100 caracteres" });
+    }
+
+    if (phone.length < 10 || phone.length > 11) {
+      return res.status(400).json({ error: "Informe um telefone válido com DDD" });
+    }
+
+    const user = await prisma.user.update({
+      where: { id: (req as any).user.id },
+      data: { name, phone },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        role: true,
+        profilePhotoUrl: true
+      }
+    });
+
+    return res.json({ message: "Perfil atualizado com sucesso", user });
+  } catch (error) {
+    console.error("Erro ao atualizar perfil:", error);
+    return res.status(500).json({ error: "Não foi possível atualizar o perfil" });
+  }
+});
 
 app.get("/api/drivers/daily-balance", auth, async (req, res) => {
   if (!role(req, Role.DRIVER)) {

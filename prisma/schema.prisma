@@ -35,9 +35,11 @@ model User {
   passwordHash    String
   role            Role
   cpfCnpj         String?
+  phone           String?
   profilePhotoUrl      String?
   profilePhotoPublicId String?
   createdAt       DateTime @default(now())
+  deletedAt       DateTime?
 
   driver          Driver?
   passengerRides  Ride[]   @relation("PassengerRides")
