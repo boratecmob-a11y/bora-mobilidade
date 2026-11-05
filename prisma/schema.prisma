@@ -46,7 +46,7 @@ enum VehicleType {
 model User {
   id              String   @id @default(cuid())
   name            String
-  email           String   @unique
+  email           String
   passwordHash    String
   role            Role
   cpfCnpj         String?
@@ -60,6 +60,8 @@ model User {
   passengerRides  Ride[]   @relation("PassengerRides")
   messages        Message[] @relation("MessageSender")
   passwordResetTokens PasswordResetToken[]
+
+  @@unique([email, role])
 }
 
 model Driver {

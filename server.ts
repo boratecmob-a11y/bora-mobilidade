@@ -38,6 +38,9 @@ async function auth(req: express.Request, res: express.Response, next: express.N
       return res.status(401).json({ error: "Esta conta não está mais ativa." });
     }
 
+    if (!tokenUser.role || tokenUser.role !== user.role) {
+      return res.status(401).json({ error: "Perfil do token não corresponde à conta." });
+    }
     (req as any).user = { id: user.id, role: user.role };
     next();
   } catch {
@@ -488,9 +491,10 @@ app.get("/api/payments/status/:rideId", auth, async (req, res) => {
 });
 
 app.post("/api/auth/register", async (req, res) => {
-  const { name, email, password, role: r, cpfCnpj, phone, profilePhoto } = req.body;
+  const { name, email, password, role: r, cpfCnpj, phone, profilePhoto, vehicleType } = req.body;
   const normalizedCpf = normalizeDocument(cpfCnpj);
   const normalizedEmail = String(email || "").trim().toLowerCase();
+  const normalizedVehicleType = String(vehicleType || "").toUpperCase();
 
   if (!name || !normalizedEmail || !password || !["PASSENGER", "DRIVER"].includes(r)) {
     return res.status(400).json({ error: "Dados inválidos" });
@@ -498,6 +502,10 @@ app.post("/api/auth/register", async (req, res) => {
 
   if (!isValidCPF(normalizedCpf)) {
     return res.status(400).json({ error: "Informe um CPF válido" });
+  }
+
+  if (r === "DRIVER" && !["CAR", "MOTO"].includes(normalizedVehicleType)) {
+    return res.status(400).json({ error: "Selecione um tipo de veículo válido" });
   }
 
   if (r === "PASSENGER") {
@@ -521,8 +529,8 @@ app.post("/api/auth/register", async (req, res) => {
   let uploaded = null;
 
   try {
-    const existingEmail = await prisma.user.findUnique({
-      where: { email: normalizedEmail }
+    const existingEmail = await prisma.user.findFirst({
+      where: { email: normalizedEmail, role: r }
     });
 
     if (existingEmail) {
@@ -530,7 +538,7 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     const existingCpf = await prisma.user.findFirst({
-      where: { cpfCnpj: normalizedCpf }
+      where: { cpfCnpj: normalizedCpf, role: r }
     });
 
     if (existingCpf) {
@@ -560,7 +568,7 @@ app.post("/api/auth/register", async (req, res) => {
     });
 
     if (r === "DRIVER") {
-      await prisma.driver.create({ data: { userId: u.id } });
+      await prisma.driver.create({ data: { userId: u.id, vehicleType: normalizedVehicleType } });
     }
 
     return res.status(201).json({
@@ -585,30 +593,43 @@ app.post("/api/auth/register", async (req, res) => {
 
 app.post("/api/auth/login", async (req, res) => {
   const normalizedEmail = String(req.body.email || "").trim().toLowerCase();
-  const u = await prisma.user.findUnique({ where: { email: normalizedEmail } });
+  const requestedRole = req.body.role;
+
+  if (!["PASSENGER", "DRIVER"].includes(requestedRole)) {
+    return res.status(400).json({ error: "Selecione o perfil de acesso" });
+  }
+
+  const u = await prisma.user.findFirst({
+    where: { email: normalizedEmail, role: requestedRole }
+  });
+
   if (!u || u.deletedAt || !(await bcrypt.compare(String(req.body.password || ""), u.passwordHash))) {
     return res.status(401).json({ error: "Login inválido" });
   }
 
-  let activeRole = u.role;
-  if (req.body.role === Role.DRIVER) {
+  if (u.role === Role.DRIVER) {
     const driver = await prisma.driver.findUnique({ where: { userId: u.id } });
-    if (!driver) return res.status(403).json({ error: "Esta conta ainda não tem perfil de motorista. Ative o perfil primeiro." });
-    activeRole = Role.DRIVER;
-  } else if (req.body.role && req.body.role !== u.role) {
-    return res.status(403).json({ error: "Perfil solicitado indisponível para esta conta" });
+    if (!driver) return res.status(403).json({ error: "Perfil de motorista indisponível" });
   }
 
-  res.json({ id: u.id, name: u.name, role: activeRole, profilePhotoUrl: u.profilePhotoUrl, token: makeToken({ ...u, role: activeRole }) });
+  res.json({
+    id: u.id,
+    name: u.name,
+    role: u.role,
+    profilePhotoUrl: u.profilePhotoUrl,
+    token: makeToken(u)
+  });
 });
 
 
 app.post("/api/auth/forgot-password", async (req, res) => {
   const email = String(req.body.email || "").trim().toLowerCase();
+  const requestedRole = req.body.role;
   const mensagem = "Se sua conta BORA existir, enviaremos um código de recuperação.";
+  if (!["PASSENGER", "DRIVER"].includes(requestedRole)) return res.json({ message: mensagem });
 
   try {
-    const user = await prisma.user.findUnique({ where: { email } });
+    const user = await prisma.user.findFirst({ where: { email, role: requestedRole } });
     if (!user) return res.json({ message: mensagem });
 
 
@@ -665,15 +686,16 @@ app.post("/api/auth/forgot-password", async (req, res) => {
 
 app.post("/api/auth/reset-password", async (req, res) => {
   const email = String(req.body.email || "").trim().toLowerCase();
+  const requestedRole = req.body.role;
   const codigo = String(req.body.code || "").trim();
   const novaSenha = String(req.body.newPassword || "");
 
-  if (!email || !/^\d{6}$/.test(codigo) || novaSenha.length < 8) {
+  if (!email || !["PASSENGER", "DRIVER"].includes(requestedRole) || !/^\d{6}$/.test(codigo) || novaSenha.length < 8) {
     return res.status(400).json({ error: "Informe e-mail, código de seis dígitos e senha com pelo menos 8 caracteres." });
   }
 
   try {
-    const user = await prisma.user.findUnique({ where: { email } });
+    const user = await prisma.user.findFirst({ where: { email, role: requestedRole } });
     if (!user) return res.status(400).json({ error: "Código inválido ou expirado." });
 
 
@@ -719,53 +741,10 @@ app.post("/api/auth/reset-password", async (req, res) => {
 });
 
 app.post("/api/auth/activate-driver", async (req, res) => {
-  const normalizedEmail = String(req.body.email || "").trim().toLowerCase();
-  const normalizedCpf = normalizeDocument(req.body.cpfCnpj);
-  const vehicleType = req.body.vehicleType;
-
-  if (!normalizedEmail || !req.body.password || !isValidCPF(normalizedCpf) || ![VehicleType.CAR, VehicleType.MOTO].includes(vehicleType)) {
-    return res.status(400).json({ error: "Informe e-mail, senha, CPF válido e tipo de veículo" });
-  }
-
-  try {
-    const u = await prisma.user.findUnique({ where: { email: normalizedEmail } });
-    if (!u || u.deletedAt) return res.status(404).json({ error: "Conta não encontrada ou indisponível" });
-    if (!(await bcrypt.compare(String(req.body.password), u.passwordHash))) {
-      return res.status(401).json({ error: "Senha incorreta" });
-    }
-    if (u.role === Role.ADMIN || normalizeDocument(u.cpfCnpj) !== normalizedCpf) {
-      return res.status(403).json({ error: "Não foi possível confirmar os dados desta conta" });
-    }
-
-    const updatedUser = await prisma.user.update({
-      where: { id: u.id },
-      data: {
-        phone: req.body.phone
-          ? String(req.body.phone).replace(/\D/g, "")
-          : u.phone
-      }
-    });
-
-    await prisma.driver.upsert({
-      where: { userId: u.id },
-      update: { vehicleType },
-      create: { userId: u.id, vehicleType }
-    });
-
-    return res.json({
-      id: u.id,
-      name: updatedUser.name,
-      email: updatedUser.email,
-      role: Role.DRIVER,
-      profilePhotoUrl: updatedUser.profilePhotoUrl,
-      token: makeToken({ ...updatedUser, role: Role.DRIVER })
-    });
-  } catch (error) {
-    console.error("Falha ao ativar perfil de motorista:", error);
-    return res.status(500).json({ error: "Não foi possível ativar o perfil de motorista" });
-  }
+  return res.status(410).json({
+    error: "Esta rota foi desativada. Faça seu cadastro pelo registro próprio de motorista."
+  });
 });
-
 
 app.get("/api/profile", auth, async (req, res) => {
   try {
@@ -1616,11 +1595,33 @@ app.post("/api/rides", auth, async (req, res) => {
 });
 
 app.get("/api/rides/:id", auth, async (req, res) => {
-  const ride = await prisma.ride.findUnique({ where: { id: req.params.id }, include: { passenger: true, driver: { include: { user: true } }, stops: { orderBy: { position: "asc" } } } });
-  if (!ride) return res.status(404).json({ error: "Corrida não encontrada" });
-  const uid = (req as any).user.id;
-  if (ride.passengerId !== uid && ride.driver?.userId !== uid) return res.status(403).json({ error: "Sem acesso a esta corrida" });
-  res.json(ride);
+    const ride = await prisma.ride.findUnique({
+      where: { id: req.params.id },
+      include: {
+        passenger: {
+          select: { id: true, name: true, profilePhotoUrl: true }
+        },
+        driver: {
+          select: {
+            id: true,
+            userId: true,
+            latitude: true,
+            longitude: true,
+            vehicleType: true,
+            user: {
+              select: { id: true, name: true, profilePhotoUrl: true }
+            }
+          }
+        },
+        stops: { orderBy: { position: "asc" } }
+      }
+    });
+    if (!ride) return res.status(404).json({ error: "Corrida não encontrada" });
+    const uid = (req as any).user.id;
+    if (ride.passengerId !== uid && ride.driver?.userId !== uid) {
+      return res.status(403).json({ error: "Sem acesso a esta corrida" });
+    }
+    res.json(ride);
 });
 
 app.post("/api/rides/:id/accept", auth, async (req, res) => {
