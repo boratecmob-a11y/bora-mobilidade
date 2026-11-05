@@ -495,9 +495,11 @@ app.post("/api/auth/register", async (req, res) => {
   if (!name || !normalizedEmail || !password || !["PASSENGER", "DRIVER"].includes(r)) {
     return res.status(400).json({ error: "Dados inválidos" });
   }
+
   if (!isValidCPF(normalizedCpf)) {
     return res.status(400).json({ error: "Informe um CPF válido" });
   }
+
   if (r === "PASSENGER") {
     if (
       typeof profilePhoto !== "string" ||
@@ -506,6 +508,7 @@ app.post("/api/auth/register", async (req, res) => {
     ) {
       return res.status(400).json({ error: "Selecione uma foto válida para o perfil" });
     }
+
     if (
       !process.env.CLOUDINARY_CLOUD_NAME ||
       !process.env.CLOUDINARY_API_KEY ||
@@ -516,10 +519,12 @@ app.post("/api/auth/register", async (req, res) => {
   }
 
   let uploaded = null;
+
   try {
     const existingEmail = await prisma.user.findUnique({
       where: { email: normalizedEmail }
     });
+
     if (existingEmail) {
       return res.status(409).json({ error: "Este e-mail já está cadastrado" });
     }
@@ -527,6 +532,7 @@ app.post("/api/auth/register", async (req, res) => {
     const existingCpf = await prisma.user.findFirst({
       where: { cpfCnpj: normalizedCpf }
     });
+
     if (existingCpf) {
       return res.status(409).json({ error: "Este CPF já está cadastrado" });
     }
@@ -571,6 +577,7 @@ app.post("/api/auth/register", async (req, res) => {
         await cloudinary.uploader.destroy(uploaded.public_id);
       } catch {}
     }
+
     console.error("Falha no cadastro:", error);
     return res.status(400).json({ error: "Não foi possível concluir o cadastro" });
   }
