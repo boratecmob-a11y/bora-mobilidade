@@ -23,6 +23,21 @@ enum RideStatus {
   CANCELLED
 }
 
+enum DocumentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum LicenseCategory {
+  A
+  B
+  AB
+  C
+  D
+  E
+}
+
 enum VehicleType {
   CAR
   MOTO
@@ -60,6 +75,8 @@ model Driver {
   updatedAt      DateTime    @updatedAt
 
   asaasAccountId String?
+  documents       DriverDocument[]
+  vehicles        DriverVehicle[]
 }
 
 model Ride {
@@ -138,4 +155,63 @@ model PasswordResetToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([expiresAt])
+}
+
+enum DriverDocumentType {
+  CNH
+  CRIMINAL_RECORD
+}
+
+model DriverDocument {
+  id               String             @id @default(cuid())
+  driverId         String
+  type             DriverDocumentType
+  licenseNumber    String?
+  licenseCategory  LicenseCategory?
+  licenseExpiresAt DateTime?
+  ear              Boolean            @default(false)
+  frontImageUrl    String?
+  frontImageFormat String?
+  backImageUrl     String?
+  backImageFormat  String?
+  documentUrl      String?
+  documentFormat   String?
+  issuedAt         DateTime?
+  status           DocumentStatus     @default(PENDING)
+  rejectionReason  String?
+  reviewedAt       DateTime?
+  createdAt        DateTime           @default(now())
+  updatedAt        DateTime           @updatedAt
+
+  driver Driver @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@unique([driverId, type])
+  @@index([status])
+}
+
+model DriverVehicle {
+  id              String         @id @default(cuid())
+  driverId        String
+  vehicleType     VehicleType
+  make            String
+  model           String
+  year            Int
+  color           String
+  plate           String         @unique
+  crlvUrl         String?
+  crlvFormat      String?
+  photoFrontUrl   String?
+  photoFrontFormat String?
+  photoSideUrl    String?
+  photoSideFormat String?
+  status          DocumentStatus @default(PENDING)
+  rejectionReason String?
+  reviewedAt      DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  driver Driver @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@unique([driverId, vehicleType])
+  @@index([status])
 }

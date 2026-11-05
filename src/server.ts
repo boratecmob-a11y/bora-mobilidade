@@ -5,14 +5,14 @@ import dotenv from "dotenv";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { v2 as cloudinary } from "cloudinary";
-import { PrismaClient, Role, RideStatus, VehicleType } from "@prisma/client";
+import { PrismaClient, Role, RideStatus, VehicleType, DocumentStatus, DriverDocumentType, LicenseCategory } from "@prisma/client";
 
 dotenv.config();
 cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, api_secret: process.env.CLOUDINARY_API_SECRET, secure: true });
 const app = express();
 const prisma = new PrismaClient();
 app.use(cors());
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: "12mb" }));
 
 const secret = process.env.JWT_SECRET || "development-secret";
 const BORA_FIXED_COMMISSION = Number(process.env.BORA_FIXED_COMMISSION || 1);
@@ -31,14 +31,14 @@ async function auth(req: express.Request, res: express.Response, next: express.N
 
     const user = await prisma.user.findUnique({
       where: { id: tokenUser.id },
-      select: { id: true, deletedAt: true }
+      select: { id: true, role: true, deletedAt: true }
     });
 
     if (!user || user.deletedAt) {
       return res.status(401).json({ error: "Esta conta não está mais ativa." });
     }
 
-    (req as any).user = tokenUser;
+    (req as any).user = { id: user.id, role: user.role };
     next();
   } catch {
     return res.status(401).json({ error: "Token inválido ou conta indisponível" });
@@ -47,6 +47,49 @@ async function auth(req: express.Request, res: express.Response, next: express.N
 
 function role(req: express.Request, r: Role) {
   return (req as any).user?.role === r;
+}
+
+async function getDriverEligibility(userId: string, vehicleType: VehicleType) {
+  const driver = await prisma.driver.findUnique({
+    where: { userId },
+    include: { documents: true, vehicles: true }
+  });
+
+  if (!driver) return { allowed: false, reason: "Cadastro de motorista não encontrado." };
+
+  const cnh = driver.documents.find(doc => doc.type === DriverDocumentType.CNH);
+  const criminalRecord = driver.documents.find(doc => doc.type === DriverDocumentType.CRIMINAL_RECORD);
+  const vehicle = driver.vehicles.find(item => item.vehicleType === vehicleType);
+
+  if (!cnh || cnh.status !== DocumentStatus.APPROVED)
+    return { allowed: false, reason: "Sua CNH ainda não foi aprovada." };
+
+  if (!cnh.ear)
+    return { allowed: false, reason: "Sua CNH precisa ter EAR." };
+
+  if (!cnh.licenseExpiresAt || cnh.licenseExpiresAt <= new Date())
+    return { allowed: false, reason: "Sua CNH está vencida ou sem validade cadastrada." };
+
+  const category = cnh.licenseCategory;
+  const validCategory = vehicleType === VehicleType.MOTO
+    ? category === LicenseCategory.A || category === LicenseCategory.AB
+    : [LicenseCategory.B, LicenseCategory.AB, LicenseCategory.C, LicenseCategory.D, LicenseCategory.E].includes(category as LicenseCategory);
+
+  if (!validCategory)
+    return { allowed: false, reason: "A categoria da CNH não permite dirigir este veículo." };
+
+  if (!criminalRecord || criminalRecord.status !== DocumentStatus.APPROVED || !criminalRecord.issuedAt)
+    return { allowed: false, reason: "Seus antecedentes criminais ainda não foram aprovados." };
+
+  const ageInDays = (Date.now() - criminalRecord.issuedAt.getTime()) / 86400000;
+
+  if (ageInDays < 0 || ageInDays > 90)
+    return { allowed: false, reason: "Envie uma certidão de antecedentes emitida nos últimos 90 dias." };
+
+  if (!vehicle || vehicle.status !== DocumentStatus.APPROVED)
+    return { allowed: false, reason: "Este veículo ainda não foi aprovado." };
+
+  return { allowed: true, reason: "Documentação aprovada." };
 }
 
 function asaasConfigured() {
@@ -775,6 +818,546 @@ app.put("/api/profile", auth, async (req, res) => {
   }
 });
 
+
+function validateDriverFile(data: unknown) {
+  if (typeof data !== "string") throw new Error("Arquivo não informado.");
+
+  const match = data.match(/^data:(image\/jpeg|image\/png|image\/webp|application\/pdf);base64,([A-Za-z0-9+/]+={0,2})$/);
+  if (!match) throw new Error("Formato inválido. Envie JPG, PNG, WebP ou PDF.");
+
+  const mime = match[1];
+  const buffer = Buffer.from(match[2], "base64");
+
+  if (!buffer.length || buffer.length > 4 * 1024 * 1024)
+    throw new Error("Cada arquivo deve ter no máximo 4 MB.");
+
+  const valid =
+    (mime === "application/pdf" && buffer.subarray(0, 5).toString() === "%PDF-") ||
+    (mime === "image/jpeg" && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) ||
+    (mime === "image/png" && buffer.subarray(0, 8).toString("hex") === "89504e470d0a1a0a") ||
+    (mime === "image/webp" && buffer.subarray(0, 4).toString() === "RIFF" && buffer.subarray(8, 12).toString() === "WEBP");
+
+  if (!valid) throw new Error("O conteúdo do arquivo não corresponde ao formato informado.");
+
+  return {
+    mime,
+    format: mime === "image/jpeg" ? "jpg" : mime.split("/")[1],
+    data
+  };
+}
+
+async function uploadPrivateDriverFile(
+  fileData: unknown,
+  driverId: string,
+  documentType: string,
+  field: string
+) {
+  const validated = validateDriverFile(fileData);
+  const uploaded = await cloudinary.uploader.upload(validated.data, {
+    folder: "bora/driver-documents/" + driverId,
+    public_id: documentType + "-" + field + "-" + Date.now() + "-" + randomInt(100000, 999999),
+    resource_type: "image",
+    type: "authenticated",
+    allowed_formats: ["jpg", "jpeg", "png", "webp", "pdf"],
+    overwrite: false
+  });
+
+  return { publicId: uploaded.public_id, format: uploaded.format };
+}
+
+app.post("/api/drivers/documents", auth, async (req, res) => {
+  if (!role(req, Role.DRIVER))
+    return res.status(403).json({ error: "Apenas motoristas podem enviar documentos." });
+
+  const userId = (req as any).user.id;
+  const type = req.body.type;
+
+  if (![DriverDocumentType.CNH, DriverDocumentType.CRIMINAL_RECORD].includes(type))
+    return res.status(400).json({ error: "Tipo de documento inválido." });
+
+  const driver = await prisma.driver.findUnique({ where: { userId } });
+  if (!driver)
+    return res.status(404).json({ error: "Cadastro de motorista não encontrado." });
+
+  const uploadedAssets: string[] = [];
+
+  try {
+    let data: any;
+
+    if (type === DriverDocumentType.CNH) {
+      const licenseNumber = String(req.body.licenseNumber || "").trim();
+      const category = req.body.licenseCategory;
+      const expiresAt = new Date(req.body.licenseExpiresAt);
+      const ear = req.body.ear;
+
+      if (!licenseNumber || licenseNumber.length > 30)
+        return res.status(400).json({ error: "Informe o número da CNH." });
+
+      if (!Object.values(LicenseCategory).includes(category))
+        return res.status(400).json({ error: "Categoria da CNH inválida." });
+
+      if (typeof req.body.licenseExpiresAt !== "string" || isNaN(expiresAt.getTime()))
+        return res.status(400).json({ error: "Informe a validade da CNH." });
+
+      if (expiresAt <= new Date())
+        return res.status(400).json({ error: "A CNH está vencida." });
+
+      if (typeof ear !== "boolean")
+        return res.status(400).json({ error: "Informe se a CNH possui EAR." });
+
+      const front = await uploadPrivateDriverFile(req.body.frontImage, driver.id, "cnh", "frente");
+      uploadedAssets.push(front.publicId);
+
+      const back = await uploadPrivateDriverFile(req.body.backImage, driver.id, "cnh", "verso");
+      uploadedAssets.push(back.publicId);
+
+      data = {
+        licenseNumber,
+        licenseCategory: category,
+        licenseExpiresAt: expiresAt,
+        ear,
+        frontImageUrl: front.publicId,
+        frontImageFormat: front.format,
+        backImageUrl: back.publicId,
+        backImageFormat: back.format,
+        status: DocumentStatus.PENDING,
+        rejectionReason: null,
+        reviewedAt: null
+      };
+    } else {
+      const issuedAt = new Date(req.body.issuedAt);
+
+      if (typeof req.body.issuedAt !== "string" || isNaN(issuedAt.getTime()))
+        return res.status(400).json({ error: "Informe a data de emissão dos antecedentes." });
+
+      const ageInDays = (Date.now() - issuedAt.getTime()) / 86400000;
+
+      if (ageInDays < 0 || ageInDays > 90)
+        return res.status(400).json({ error: "A certidão deve ter sido emitida nos últimos 90 dias." });
+
+      const document = await uploadPrivateDriverFile(req.body.document, driver.id, "antecedentes", "certidao");
+      uploadedAssets.push(document.publicId);
+
+      data = {
+        issuedAt,
+        documentUrl: document.publicId,
+        documentFormat: document.format,
+        status: DocumentStatus.PENDING,
+        rejectionReason: null,
+        reviewedAt: null
+      };
+    }
+
+    const saved = await prisma.driverDocument.upsert({
+      where: {
+        driverId_type: { driverId: driver.id, type }
+      },
+      create: {
+        driverId: driver.id,
+        type,
+        ...data
+      },
+      update: data
+    });
+
+    return res.status(200).json({
+      message: "Documento enviado para análise.",
+      document: {
+        type: saved.type,
+        status: saved.status,
+        rejectionReason: saved.rejectionReason
+      }
+    });
+  } catch (error: any) {
+    for (const publicId of uploadedAssets) {
+      try {
+        await cloudinary.uploader.destroy(publicId, {
+          resource_type: "image",
+          type: "authenticated"
+        });
+      } catch {}
+    }
+
+    console.error("Erro no envio de documento do motorista:", error);
+    return res.status(400).json({
+      error: error.message || "Não foi possível enviar o documento."
+    });
+  }
+});
+
+app.get("/api/drivers/documents", auth, async (req, res) => {
+  if (!role(req, Role.DRIVER))
+    return res.status(403).json({ error: "Apenas motoristas podem consultar seus documentos." });
+
+  try {
+    const driver = await prisma.driver.findUnique({
+      where: { userId: (req as any).user.id },
+      include: { documents: true }
+    });
+
+    if (!driver)
+      return res.status(404).json({ error: "Cadastro de motorista não encontrado." });
+
+    return res.json(driver.documents.map(doc => ({
+      type: doc.type,
+      status: doc.status,
+      rejectionReason: doc.rejectionReason,
+      licenseNumber: doc.licenseNumber,
+      licenseCategory: doc.licenseCategory,
+      licenseExpiresAt: doc.licenseExpiresAt,
+      ear: doc.ear,
+      issuedAt: doc.issuedAt
+    })));
+  } catch (error) {
+    console.error("Erro ao consultar documentos:", error);
+    return res.status(500).json({ error: "Não foi possível consultar os documentos." });
+  }
+});
+
+app.get("/api/admin/driver-review/pending", auth, async (req, res) => {
+  if (!role(req, Role.ADMIN)) {
+    return res.status(403).json({ error: "Apenas administradores podem consultar análises." });
+  }
+
+  try {
+    const drivers = await prisma.driver.findMany({
+      where: {
+        OR: [
+          { documents: { some: { status: DocumentStatus.PENDING } } },
+          { vehicles: { some: { status: DocumentStatus.PENDING } } }
+        ]
+      },
+      include: {
+        user: {
+          select: { id: true, name: true, email: true }
+        },
+        documents: {
+          where: { status: DocumentStatus.PENDING }
+        },
+        vehicles: {
+          where: { status: DocumentStatus.PENDING }
+        }
+      }
+    });
+
+    return res.json({
+      drivers: drivers.map(driver => ({
+        driverId: driver.id,
+        user: driver.user,
+        documents: driver.documents.map(doc => ({
+          id: doc.id,
+          type: doc.type,
+          licenseNumber: doc.licenseNumber,
+          licenseCategory: doc.licenseCategory,
+          licenseExpiresAt: doc.licenseExpiresAt,
+          ear: doc.ear,
+          issuedAt: doc.issuedAt,
+          status: doc.status,
+          createdAt: doc.createdAt
+        })),
+        vehicles: driver.vehicles.map(vehicle => ({
+          id: vehicle.id,
+          vehicleType: vehicle.vehicleType,
+          make: vehicle.make,
+          model: vehicle.model,
+          year: vehicle.year,
+          color: vehicle.color,
+          plate: vehicle.plate,
+          status: vehicle.status,
+          createdAt: vehicle.createdAt
+        }))
+      }))
+    });
+  } catch (error) {
+    console.error("Erro ao consultar análises pendentes:", error);
+    return res.status(500).json({ error: "Não foi possível consultar as análises pendentes." });
+  }
+});
+
+app.get("/api/admin/driver-review/:kind/:id/files", auth, async (req, res) => {
+  if (!role(req, Role.ADMIN)) {
+    return res.status(403).json({ error: "Apenas administradores podem visualizar documentos." });
+  }
+
+  const { kind, id } = req.params;
+
+  if (!["documents", "vehicles"].includes(kind)) {
+    return res.status(400).json({ error: "Tipo de cadastro inválido." });
+  }
+
+  try {
+    const expiresAt = Math.floor(Date.now() / 1000) + 300;
+
+    const signedUrl = (publicId: string | null, format: string | null) => {
+      if (!publicId || !format) return null;
+
+      return cloudinary.utils.private_download_url(publicId, format, {
+        resource_type: "image",
+        type: "authenticated",
+        expires_at: expiresAt
+      });
+    };
+
+    if (kind === "documents") {
+      const doc = await prisma.driverDocument.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          type: true,
+          status: true,
+          frontImageUrl: true,
+          frontImageFormat: true,
+          backImageUrl: true,
+          backImageFormat: true,
+          documentUrl: true,
+          documentFormat: true
+        }
+      });
+
+      if (!doc) {
+        return res.status(404).json({ error: "Documento não encontrado." });
+      }
+
+      const files = doc.type === DriverDocumentType.CNH
+        ? {
+            front: signedUrl(doc.frontImageUrl, doc.frontImageFormat),
+            back: signedUrl(doc.backImageUrl, doc.backImageFormat)
+          }
+        : {
+            certificate: signedUrl(doc.documentUrl, doc.documentFormat)
+          };
+
+      res.set("Cache-Control", "private, no-store");
+      return res.json({ id: doc.id, type: doc.type, status: doc.status, expiresAt, files });
+    }
+
+    const vehicle = await prisma.driverVehicle.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        status: true,
+        crlvUrl: true,
+        crlvFormat: true,
+        photoFrontUrl: true,
+        photoFrontFormat: true,
+        photoSideUrl: true,
+        photoSideFormat: true
+      }
+    });
+
+    if (!vehicle) {
+      return res.status(404).json({ error: "Veículo não encontrado." });
+    }
+
+    res.set("Cache-Control", "private, no-store");
+    return res.json({
+      id: vehicle.id,
+      status: vehicle.status,
+      expiresAt,
+      files: {
+        crlv: signedUrl(vehicle.crlvUrl, vehicle.crlvFormat),
+        front: signedUrl(vehicle.photoFrontUrl, vehicle.photoFrontFormat),
+        side: signedUrl(vehicle.photoSideUrl, vehicle.photoSideFormat)
+      }
+    });
+  } catch (error) {
+    console.error("Erro ao gerar acesso aos documentos:", error);
+    return res.status(500).json({ error: "Não foi possível gerar acesso aos arquivos." });
+  }
+});
+
+app.patch("/api/admin/driver-review/:kind/:id", auth, async (req, res) => {
+  if (!role(req, Role.ADMIN)) {
+    return res.status(403).json({ error: "Apenas administradores podem analisar cadastros." });
+  }
+
+  const { kind, id } = req.params;
+  const { decision, rejectionReason } = req.body;
+
+  if (!["documents", "vehicles"].includes(kind)) {
+    return res.status(400).json({ error: "Tipo de cadastro inválido." });
+  }
+
+  if (!["APPROVED", "REJECTED"].includes(decision)) {
+    return res.status(400).json({ error: "Decisão inválida." });
+  }
+
+  const reason = typeof rejectionReason === "string"
+    ? rejectionReason.trim()
+    : "";
+
+  if (decision === "REJECTED" && (!reason || reason.length > 500)) {
+    return res.status(400).json({
+      error: "Informe o motivo da rejeição, com no máximo 500 caracteres."
+    });
+  }
+
+  try {
+    const data = {
+      status: decision as DocumentStatus,
+      rejectionReason: decision === "REJECTED" ? reason : null,
+      reviewedAt: new Date()
+    };
+
+    if (kind === "documents") {
+      const existing = await prisma.driverDocument.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          type: true,
+          status: true,
+          licenseNumber: true,
+          licenseCategory: true,
+          licenseExpiresAt: true,
+          ear: true,
+          frontImageUrl: true,
+          backImageUrl: true,
+          documentUrl: true,
+          issuedAt: true
+        }
+      });
+
+      if (!existing) {
+        return res.status(404).json({ error: "Documento não encontrado." });
+      }
+
+      if (existing.status !== DocumentStatus.PENDING) {
+        return res.status(409).json({ error: "Este documento já foi analisado." });
+      }
+
+      if (decision === "APPROVED" && existing.type === DriverDocumentType.CNH) {
+        if (
+          !existing.licenseNumber ||
+          !existing.licenseCategory ||
+          !existing.licenseExpiresAt ||
+          existing.licenseExpiresAt <= new Date() ||
+          !existing.ear ||
+          !existing.frontImageUrl ||
+          !existing.backImageUrl
+        ) {
+          return res.status(400).json({
+            error: "CNH incompleta ou inválida: confira número, categoria, validade, EAR e fotos da frente e do verso."
+          });
+        }
+      }
+
+      if (decision === "APPROVED" && existing.type === DriverDocumentType.CRIMINAL_RECORD) {
+        const ageInDays = existing.issuedAt
+          ? (Date.now() - existing.issuedAt.getTime()) / 86400000
+          : Infinity;
+
+        if (
+          !existing.documentUrl ||
+          !existing.issuedAt ||
+          ageInDays < 0 ||
+          ageInDays > 90
+        ) {
+          return res.status(400).json({
+            error: "Certidão inválida ou incompleta: confira o arquivo e a data de emissão dos últimos 90 dias."
+          });
+        }
+      }
+
+      const result = await prisma.driverDocument.updateMany({
+        where: { id, status: DocumentStatus.PENDING },
+        data
+      });
+
+      if (result.count === 0) {
+        return res.status(409).json({
+          error: "Este cadastro já foi analisado por outro administrador."
+        });
+      }
+
+      const updated = await prisma.driverDocument.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          status: true,
+          rejectionReason: true,
+          reviewedAt: true
+        }
+      });
+
+      if (!updated) {
+        return res.status(404).json({ error: "Documento não encontrado." });
+      }
+
+      return res.json({
+        message: decision === "APPROVED" ? "Documento aprovado." : "Documento rejeitado.",
+        id: updated.id,
+        status: updated.status,
+        rejectionReason: updated.rejectionReason,
+        reviewedAt: updated.reviewedAt
+      });
+    }
+
+    const existing = await prisma.driverVehicle.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        status: true,
+        crlvUrl: true,
+        photoFrontUrl: true,
+        photoSideUrl: true
+      }
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: "Veículo não encontrado." });
+    }
+
+    if (existing.status !== DocumentStatus.PENDING) {
+      return res.status(409).json({ error: "Este veículo já foi analisado." });
+    }
+
+    if (
+      decision === "APPROVED" &&
+      (!existing.crlvUrl || !existing.photoFrontUrl || !existing.photoSideUrl)
+    ) {
+      return res.status(400).json({
+        error: "Não é possível aprovar: envie o CRLV, a foto frontal e a foto lateral do veículo."
+      });
+    }
+
+    const result = await prisma.driverVehicle.updateMany({
+      where: { id, status: DocumentStatus.PENDING },
+      data
+    });
+
+    if (result.count === 0) {
+      return res.status(409).json({
+        error: "Este cadastro já foi analisado por outro administrador."
+      });
+    }
+
+    const updated = await prisma.driverVehicle.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        status: true,
+        rejectionReason: true,
+        reviewedAt: true
+      }
+    });
+
+    if (!updated) {
+      return res.status(404).json({ error: "Veículo não encontrado." });
+    }
+
+    return res.json({
+      message: decision === "APPROVED" ? "Veículo aprovado." : "Veículo rejeitado.",
+      id: updated.id,
+      status: updated.status,
+      rejectionReason: updated.rejectionReason,
+      reviewedAt: updated.reviewedAt
+    });
+  } catch (error) {
+    console.error("Erro na análise administrativa:", error);
+    return res.status(500).json({ error: "Não foi possível concluir a análise." });
+  }
+});
+
 app.get("/api/drivers/daily-balance", auth, async (req, res) => {
   if (!role(req, Role.DRIVER)) {
     return res.status(403).json({ error: "Apenas motoristas" });
@@ -837,33 +1420,93 @@ app.get("/api/drivers/daily-balance", auth, async (req, res) => {
 
 app.post("/api/drivers/online", auth, async (req, res) => {
   if (!role(req, Role.DRIVER)) return res.status(403).json({ error: "Apenas motoristas" });
-  const data: any = { online: Boolean(req.body.online) };
-  if (req.body.vehicleType !== undefined) {
-    if (![VehicleType.CAR, VehicleType.MOTO].includes(req.body.vehicleType)) return res.status(400).json({ error: "Tipo de veículo inválido. Use CAR ou MOTO" });
-    data.vehicleType = req.body.vehicleType;
+
+  if (typeof req.body.online !== "boolean") {
+    return res.status(400).json({ error: "Informe online como verdadeiro ou falso." });
   }
-  const d = await prisma.driver.update({ where: { userId: (req as any).user.id }, data });
+
+  const userId = (req as any).user.id;
+  const currentDriver = await prisma.driver.findUnique({ where: { userId } });
+
+  if (!currentDriver) {
+    return res.status(404).json({ error: "Cadastro de motorista não encontrado." });
+  }
+
+  const requestedOnline = req.body.online;
+  const selectedVehicle = req.body.vehicleType ?? currentDriver.vehicleType;
+
+  if (req.body.vehicleType !== undefined &&
+      req.body.vehicleType !== VehicleType.CAR &&
+      req.body.vehicleType !== VehicleType.MOTO) {
+    return res.status(400).json({ error: "Tipo de veículo inválido. Use CAR ou MOTO." });
+  }
+
+  if (requestedOnline) {
+    if (selectedVehicle !== VehicleType.CAR && selectedVehicle !== VehicleType.MOTO) {
+      return res.status(400).json({ error: "Selecione um veículo válido." });
+    }
+
+    const eligibility = await getDriverEligibility(userId, selectedVehicle);
+    if (!eligibility.allowed) {
+      return res.status(403).json({ error: eligibility.reason });
+    }
+  }
+
+  const data: any = { online: requestedOnline };
+  if (req.body.vehicleType !== undefined) data.vehicleType = req.body.vehicleType;
+
+  const d = await prisma.driver.update({ where: { userId }, data });
   res.json(d);
 });
 
 app.post("/api/drivers/location", auth, async (req, res) => {
   if (!role(req, Role.DRIVER)) return res.status(403).json({ error: "Apenas motoristas" });
+
   const { latitude, longitude } = req.body;
-  if (typeof latitude !== "number" || typeof longitude !== "number") return res.status(400).json({ error: "Localização inválida" });
-  const d = await prisma.driver.update({ where: { userId: (req as any).user.id }, data: { latitude, longitude, online: true } });
+  if (typeof latitude !== "number" || typeof longitude !== "number" ||
+      !Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+      latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+    return res.status(400).json({ error: "Localização inválida" });
+  }
+
+  const d = await prisma.driver.update({
+    where: { userId: (req as any).user.id },
+    data: { latitude, longitude }
+  });
   res.json(d);
 });
 
 app.get("/api/rides/available", auth, async (req, res) => {
   if (!role(req, Role.DRIVER)) return res.status(403).json({ error: "Apenas motoristas" });
-  const d = await prisma.driver.findUnique({ where: { userId: (req as any).user.id } });
+
+  const userId = (req as any).user.id;
+  const d = await prisma.driver.findUnique({ where: { userId } });
+
   if (!d || !d.online || !d.vehicleType) return res.json([]);
+
+  const eligibility = await getDriverEligibility(userId, d.vehicleType);
+  if (!eligibility.allowed) {
+    await prisma.driver.update({
+      where: { userId },
+      data: { online: false }
+    });
+    return res.json([]);
+  }
+
   const rides = await prisma.ride.findMany({
-    where: { status: RideStatus.SEARCHING_DRIVER, driverId: null, vehicleType: d.vehicleType },
+    where: {
+      status: RideStatus.SEARCHING_DRIVER,
+      driverId: null,
+      vehicleType: d.vehicleType
+    },
     orderBy: { createdAt: "asc" },
     take: 20,
-    include: { passenger: { select: { name: true, profilePhotoUrl: true } }, stops: { orderBy: { position: "asc" } } }
+    include: {
+      passenger: { select: { name: true, profilePhotoUrl: true } },
+      stops: { orderBy: { position: "asc" } }
+    }
   });
+
   res.json(rides);
 });
 
