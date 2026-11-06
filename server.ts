@@ -1000,6 +1000,212 @@ app.get("/api/drivers/documents", auth, async (req, res) => {
   }
 });
 
+
+app.get("/api/drivers/vehicles", auth, async (req, res) => {
+  if (!role(req, Role.DRIVER)) {
+    return res.status(403).json({ error: "Apenas motoristas podem consultar seus veículos." });
+  }
+
+  try {
+    const driver = await prisma.driver.findUnique({
+      where: { userId: (req as any).user.id },
+      include: { vehicles: true }
+    });
+
+    if (!driver) {
+      return res.status(404).json({ error: "Cadastro de motorista não encontrado." });
+    }
+
+    return res.json(driver.vehicles.map(vehicle => ({
+      id: vehicle.id,
+      vehicleType: vehicle.vehicleType,
+      make: vehicle.make,
+      model: vehicle.model,
+      year: vehicle.year,
+      color: vehicle.color,
+      plate: vehicle.plate,
+      status: vehicle.status,
+      rejectionReason: vehicle.rejectionReason,
+      createdAt: vehicle.createdAt
+    })));
+  } catch (error) {
+    console.error("Erro ao consultar veículos:", error);
+    return res.status(500).json({ error: "Não foi possível consultar os veículos." });
+  }
+});
+
+app.post("/api/drivers/vehicles", auth, async (req, res) => {
+  if (!role(req, Role.DRIVER)) {
+    return res.status(403).json({
+      error: "Apenas motoristas podem cadastrar veículos."
+    });
+  }
+
+  const userId = (req as any).user.id;
+  const uploadedAssets: string[] = [];
+
+  try {
+    const driver = await prisma.driver.findUnique({
+      where: { userId }
+    });
+
+    if (!driver) {
+      return res.status(404).json({
+        error: "Cadastro de motorista não encontrado."
+      });
+    }
+
+    const vehicleType = req.body.vehicleType;
+
+    if (!Object.values(VehicleType).includes(vehicleType)) {
+      return res.status(400).json({
+        error: "Selecione CAR ou MOTO."
+      });
+    }
+    const make = String(req.body.make || "").trim();
+    const model = String(req.body.model || "").trim();
+    const color = String(req.body.color || "").trim();
+    const plate = String(req.body.plate || "")
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "");
+
+    const year = Number(req.body.year);
+
+    if (!make || make.length > 50 ||
+        !model || model.length > 50 ||
+        !color || color.length > 30) {
+      return res.status(400).json({
+        error: "Informe marca, modelo e cor corretamente."
+      });
+    }
+
+    const currentYear = new Date().getFullYear();
+
+    if (!Number.isInteger(year) ||
+        year < 1950 || year > currentYear + 1) {
+      return res.status(400).json({
+        error: "Ano do veículo inválido."
+      });
+    }
+
+    if (!/^[A-Z]{3}[0-9][A-Z0-9][0-9]{2}$/.test(plate)) {
+      return res.status(400).json({
+        error: "Placa inválida."
+      });
+    }
+    const existing = await prisma.driverVehicle.findUnique({
+      where: {
+        driverId_vehicleType: {
+          driverId: driver.id,
+          vehicleType
+        }
+      }
+    });
+
+    if (existing && existing.status !== DocumentStatus.REJECTED) {
+      return res.status(409).json({
+        error: "Este veículo já está cadastrado e não pode ser substituído enquanto estiver pendente ou aprovado."
+      });
+    }
+
+    const plateOwner = await prisma.driverVehicle.findUnique({
+      where: { plate }
+    });
+
+    if (plateOwner && plateOwner.id !== existing?.id) {
+      return res.status(409).json({
+        error: "Esta placa já está cadastrada no sistema."
+      });
+    }
+    validateDriverFile(req.body.crlv);
+    const frontData = validateDriverFile(req.body.photoFront);
+    const sideData = validateDriverFile(req.body.photoSide);
+
+    if (
+      frontData.mime === "application/pdf" ||
+      sideData.mime === "application/pdf"
+    ) {
+      return res.status(400).json({
+        error: "As fotos do veículo devem ser imagens, não PDF."
+      });
+    }
+
+    const crlv = await uploadPrivateDriverFile(
+      req.body.crlv, driver.id, "veiculo-" + vehicleType, "crlv"
+    );
+    uploadedAssets.push(crlv.publicId);
+
+    const front = await uploadPrivateDriverFile(
+      req.body.photoFront, driver.id, "veiculo-" + vehicleType, "frente"
+    );
+    uploadedAssets.push(front.publicId);
+
+    const side = await uploadPrivateDriverFile(
+      req.body.photoSide, driver.id, "veiculo-" + vehicleType, "lateral"
+    );
+    uploadedAssets.push(side.publicId);
+
+    const data = {
+      make,
+      model,
+      year,
+      color,
+      plate,
+      crlvUrl: crlv.publicId,
+      crlvFormat: crlv.format,
+      photoFrontUrl: front.publicId,
+      photoFrontFormat: front.format,
+      photoSideUrl: side.publicId,
+      photoSideFormat: side.format,
+      status: DocumentStatus.PENDING,
+      rejectionReason: null,
+      reviewedAt: null
+    };
+
+    const vehicle = await prisma.driverVehicle.upsert({
+      where: {
+        driverId_vehicleType: {
+          driverId: driver.id,
+          vehicleType
+        }
+      },
+      create: {
+        driverId: driver.id,
+        vehicleType,
+        ...data
+      },
+      update: data
+    });
+
+    return res.status(201).json({
+      message: "Veículo cadastrado e enviado para análise.",
+      vehicle: {
+        id: vehicle.id,
+        vehicleType: vehicle.vehicleType,
+        status: vehicle.status,
+        rejectionReason: vehicle.rejectionReason
+      }
+    });
+
+  } catch (error: any) {
+    for (const publicId of uploadedAssets) {
+      try {
+        await cloudinary.uploader.destroy(publicId, {
+          resource_type: "image",
+          type: "authenticated"
+        });
+      } catch {}
+    }
+
+    console.error("Erro no cadastro do veículo:", error);
+
+    return res.status(400).json({
+      error: error.message ||
+        "Não foi possível cadastrar o veículo."
+    });
+  }
+});
+
 app.get("/api/admin/driver-review/pending", auth, async (req, res) => {
   if (!role(req, Role.ADMIN)) {
     return res.status(403).json({ error: "Apenas administradores podem consultar análises." });
