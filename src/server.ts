@@ -14,7 +14,7 @@ const app = express();
 const prisma = new PrismaClient();
 app.use(cors());
 app.use(express.json({ limit: "12mb" }));
-app.use(express.static(path.join(process.cwd(), "public")));
+app.use(express.static(path.join(__dirname, "public")));
 
 const secret = process.env.JWT_SECRET || "development-secret";
 const BORA_FIXED_COMMISSION = Number(process.env.BORA_FIXED_COMMISSION || 1);
