@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BORA | Painel Administrativo</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f4f6;color:#202124;font:15px Arial,sans-serif}
+header{background:#171717;color:white;padding:18px 24px;display:flex;justify-content:space-between;align-items:center}
+header b{color:#ff7900;font-size:25px}main{max-width:1100px;margin:28px auto;padding:0 16px}
+.card{background:white;border-radius:12px;padding:22px;margin-bottom:18px;box-shadow:0 2px 9px #0000000c}
+h2{margin-top:0}input,select,button{padding:11px;border:1px solid #ccc;border-radius:7px;font-size:15px}
+input,select{width:100%;margin:6px 0 12px}button{background:#f47700;color:white;border:0;cursor:pointer;font-weight:bold;margin:4px}
+button.dark{background:#333}button.red{background:#b42318}.hidden{display:none}
+nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
+table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:10px;border-bottom:1px solid #eee}
+.small{color:#666;font-size:13px}.status{font-weight:bold}.msg{margin:12px 0;color:#b42318}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+@media(max-width:600px){header{padding:14px}td,th{padding:7px;font-size:13px}}
+</style></head>
+<body>
+<header><b>BORA</b><span>Painel administrativo <button id="logout" class="dark hidden" onclick="logout()">Sair</button></span></header>
+<main>
+<section id="login" class="card">
+<h2>Acesso administrativo</h2><p class="small">Entre com sua conta administrativa BORA.</p>
+<form onsubmit="login(event)">
+<label>E-mail</label><input id="email" type="email" required autocomplete="username">
+<label>Senha</label><input id="password" type="password" required autocomplete="current-password">
+<button type="submit">Entrar</button><div id="loginMsg" class="msg"></div></form>
+</section>
+<section id="app" class="hidden">
+<nav><button onclick="show('staff')">Funcionários</button><button onclick="show('audit')">Auditoria</button></nav>
+<section id="staff" class="card">
+<h2>Gestão de funcionários</h2>
+<form id="createForm" onsubmit="createStaff(event)">
+<div class="grid"><div><label>Nome</label><input id="newName" required minlength="2"></div>
+<div><label>E-mail</label><input id="newEmail" type="email" required></div>
+<div><label>Senha inicial (mínimo 12 caracteres)</label><input id="newPassword" type="password" minlength="12" required></div>
+<div><label>Perfil</label><select id="newRole"><option>SUPPORT</option><option>ANALYST</option><option>SUPERVISOR</option></select></div></div>
+<button type="submit">Cadastrar funcionário</button></form>
+<div id="staffMsg" class="msg"></div><div id="staffList">Carregando...</div>
+</section>
+<section id="audit" class="card hidden"><h2>Registro de auditoria</h2><button onclick="loadAudit()">Atualizar</button><div id="auditList">Carregando...</div></section>
+</section></main>
+<script>
+let token=sessionStorage.getItem("bora_admin_token");
+const $=id=>document.getElementById(id);
+async function api(url,options={}){const r=await fetch(url,{...options,headers:{"Content-Type":"application/json","Authorization":"Bearer "+token,...options.headers}});const data=await r.json().catch(()=>({}));if(r.status===401){logout();throw Error("Sessão encerrada. Entre novamente.")}if(!r.ok)throw Error(data.error||"Falha na operação");return data}
+function show(id){$("staff").classList.toggle("hidden",id!=="staff");$("audit").classList.toggle("hidden",id!=="audit");if(id==="staff")loadStaff();if(id==="audit")loadAudit()}
+function start(){const ok=!!token;$("login").classList.toggle("hidden",ok);$("app").classList.toggle("hidden",!ok);$("logout").classList.toggle("hidden",!ok);if(ok)loadStaff()}
+function logout(){sessionStorage.removeItem("bora_admin_token");token=null;start()}
+async function login(e){e.preventDefault();$("loginMsg").textContent="";try{const d=await fetch("/api/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:$("email").value,password:$("password").value})}).then(async r=>{let x=await r.json();if(!r.ok)throw Error(x.error);return x});token=d.token;sessionStorage.setItem("bora_admin_token",token);$("password").value="";start()}catch(x){$("loginMsg").textContent=x.message}}
+async function loadStaff(){try{const a=await api("/api/admin/staff");$("staffList").innerHTML="<table><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th><th>Ações</th></tr>"+a.map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.email)}</td><td>${x.role}</td><td>${x.active?"Ativo":"Bloqueado"}</td><td><button onclick="editStaff('${x.id}','${x.role}',${x.active})">Alterar</button></td></tr>`).join("")+"</table>"}catch(e){$("staffList").textContent=e.message}}
+async function createStaff(e){e.preventDefault();try{await api("/api/admin/staff",{method:"POST",body:JSON.stringify({name:$("newName").value,email:$("newEmail").value,password:$("newPassword").value,role:$("newRole").value})});$("createForm").reset();$("staffMsg").textContent="Funcionário cadastrado.";loadStaff()}catch(x){$("staffMsg").textContent=x.message}}
+async function editStaff(id,role,active){const r=prompt("Novo perfil: SUPERVISOR, SUPPORT ou ANALYST. Deixe vazio para manter.",role);if(r===null)return;const a=confirm("Conta atualmente "+(active?"ativa":"bloqueada")+". OK = ativar; Cancelar = bloquear.");const reason=prompt("Motivo da alteração:")||"";const body={active:a,reason};if(r.trim())body.role=r.trim().toUpperCase();try{await api("/api/admin/staff/"+id,{method:"PATCH",body:JSON.stringify(body)});loadStaff()}catch(e){alert(e.message)}}
+async function loadAudit(){try{const d=await api("/api/admin/audit-logs");$("auditList").innerHTML="<p>Total: "+d.total+"</p><table><tr><th>Data</th><th>Responsável</th><th>Ação</th><th>Registro</th><th>Motivo</th></tr>"+d.logs.map(x=>`<tr><td>${new Date(x.createdAt).toLocaleString("pt-BR")}</td><td>${esc(x.actorEmail)}</td><td>${esc(x.action)}</td><td>${esc(x.entityType)} ${esc(x.entityId||"")}</td><td>${esc(x.reason||"")}</td></tr>`).join("")+"</table>"}catch(e){$("auditList").textContent=e.message}}
+function esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+start();
+
+async function requestOwner(e) {
+ e.preventDefault();
+ const msg = document.getElementById('ownerMsg');
+ try {
+  const r = await fetch('/api/admin/activation/request', {
+   method:'POST', headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({
+    name:document.getElementById('ownerName').value,
+    email:document.getElementById('ownerEmail').value
+   })
+  });
+  const d = await r.json();
+  msg.textContent = d.message || (r.ok ? 'Código enviado por e-mail.' : 'Não foi possível solicitar o código.');
+ } catch { msg.textContent = 'Falha de conexão com a API.'; }
+}
+async function confirmOwner(e) {
+ e.preventDefault();
+ const msg = document.getElementById('ownerMsg');
+ try {
+  const r = await fetch('/api/admin/activation/confirm', {
+   method:'POST', headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({
+    code:document.getElementById('ownerCode').value,
+    password:document.getElementById('ownerPassword').value
+   })
+  });
+  const d = await r.json();
+  msg.textContent = d.message || (r.ok ? 'OWNER ativado. Agora entre pelo login.' : 'Não foi possível ativar a conta.');
+ } catch { msg.textContent = 'Falha de conexão com a API.'; }
+}
+
+</script>
+<section class="card" style="margin-top:24px">
+<h2>Ativação inicial do OWNER</h2>
+<p>Ative a conta principal para administrar o BORA.</p>
+<form onsubmit="requestOwner(event)">
+<input id="ownerName" placeholder="Nome do administrador" required minlength="2">
+<input id="ownerEmail" type="email" value="boratecmob@gmail.com" readonly>
+<button type="submit">Enviar código por e-mail</button>
+</form>
+<form onsubmit="confirmOwner(event)" style="margin-top:12px">
+<input id="ownerCode" placeholder="Código de 6 dígitos" maxlength="6" required>
+<input id="ownerPassword" type="password" placeholder="Senha (mínimo 12 caracteres)" minlength="12" required>
+<button type="submit">Ativar conta OWNER</button>
+</form>
+<p id="ownerMsg"></p>
+</section>
+
+</body></html>

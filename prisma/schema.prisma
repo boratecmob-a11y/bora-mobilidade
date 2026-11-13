@@ -44,75 +44,75 @@ enum VehicleType {
 }
 
 model User {
-  id              String   @id @default(cuid())
-  name            String
-  email           String
-  passwordHash    String
-  role            Role
-  cpfCnpj         String?
-  phone           String?
+  id                   String    @id @default(cuid())
+  name                 String
+  email                String
+  passwordHash         String
+  role                 Role
+  cpfCnpj              String?
+  phone                String?
   profilePhotoUrl      String?
   profilePhotoPublicId String?
-  createdAt       DateTime @default(now())
-  deletedAt       DateTime?
+  createdAt            DateTime  @default(now())
+  deletedAt            DateTime?
 
-  driver          Driver?
-  passengerRides  Ride[]   @relation("PassengerRides")
-  messages        Message[] @relation("MessageSender")
+  driver              Driver?
+  passengerRides      Ride[]               @relation("PassengerRides")
+  messages            Message[]            @relation("MessageSender")
   passwordResetTokens PasswordResetToken[]
 
   @@unique([email, role])
 }
 
 model Driver {
-  id             String      @id @default(cuid())
-  userId         String      @unique
-  user            User        @relation(fields: [userId], references: [id])
-  online         Boolean     @default(false)
-  latitude       Float?
-  longitude      Float?
-  rating         Float       @default(5)
-  vehicleType    VehicleType?
-  rides          Ride[]      @relation("DriverRides")
-  updatedAt      DateTime    @updatedAt
+  id          String       @id @default(cuid())
+  userId      String       @unique
+  user        User         @relation(fields: [userId], references: [id])
+  online      Boolean      @default(false)
+  latitude    Float?
+  longitude   Float?
+  rating      Float        @default(5)
+  vehicleType VehicleType?
+  rides       Ride[]       @relation("DriverRides")
+  updatedAt   DateTime     @updatedAt
 
   asaasAccountId String?
-  documents       DriverDocument[]
-  vehicles        DriverVehicle[]
+  documents      DriverDocument[]
+  vehicles       DriverVehicle[]
 }
 
 model Ride {
-  id               String      @id @default(cuid())
-  passengerId      String
-  driverId         String?
+  id          String  @id @default(cuid())
+  passengerId String
+  driverId    String?
 
-  passenger        User        @relation("PassengerRides", fields: [passengerId], references: [id])
-  driver           Driver?     @relation("DriverRides", fields: [driverId], references: [id])
+  passenger User    @relation("PassengerRides", fields: [passengerId], references: [id])
+  driver    Driver? @relation("DriverRides", fields: [driverId], references: [id])
 
-  originLat        Float
-  originLng        Float
-  destinationLat   Float
-  destinationLng   Float
+  originLat      Float
+  originLng      Float
+  destinationLat Float
+  destinationLng Float
 
-  vehicleType      VehicleType
-  estimatedFare    Float
-  commission       Float
-  driverPayout     Float
+  vehicleType   VehicleType
+  estimatedFare Float
+  commission    Float
+  driverPayout  Float
 
-  status           RideStatus  @default(REQUESTED)
-  createdAt        DateTime    @default(now())
-  updatedAt        DateTime    @updatedAt
+  status    RideStatus @default(REQUESTED)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
 
-  paymentStatus    String      @default("NOT_PAID")
-  paymentMethod    String?
+  paymentStatus      String     @default("NOT_PAID")
+  paymentMethod      String?
   paymentConfirmedAt DateTime?
-  asaasPaymentId   String?
-  asaasCustomerId  String?
+  asaasPaymentId     String?
+  asaasCustomerId    String?
+  messages           Message[]
+  stops              RideStop[]
 
   @@index([status, vehicleType, driverId])
   @@index([passengerId, createdAt])
-  messages         Message[]
-  stops            RideStop[]
 }
 
 model Message {
@@ -144,15 +144,14 @@ model RideStop {
   @@index([rideId, position])
 }
 
-
 model PasswordResetToken {
-  id        String   @id @default(cuid())
-  userId    String   @unique
+  id        String    @id @default(cuid())
+  userId    String    @unique
   codeHash  String
   expiresAt DateTime
-  attempts  Int      @default(0)
+  attempts  Int       @default(0)
   usedAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -192,28 +191,80 @@ model DriverDocument {
 }
 
 model DriverVehicle {
-  id              String         @id @default(cuid())
-  driverId        String
-  vehicleType     VehicleType
-  make            String
-  model           String
-  year            Int
-  color           String
-  plate           String         @unique
-  crlvUrl         String?
-  crlvFormat      String?
-  photoFrontUrl   String?
+  id               String         @id @default(cuid())
+  driverId         String
+  vehicleType      VehicleType
+  make             String
+  model            String
+  year             Int
+  color            String
+  plate            String         @unique
+  crlvUrl          String?
+  crlvFormat       String?
+  photoFrontUrl    String?
   photoFrontFormat String?
-  photoSideUrl    String?
-  photoSideFormat String?
-  status          DocumentStatus @default(PENDING)
-  rejectionReason String?
-  reviewedAt      DateTime?
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  photoSideUrl     String?
+  photoSideFormat  String?
+  status           DocumentStatus @default(PENDING)
+  rejectionReason  String?
+  reviewedAt       DateTime?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
 
   driver Driver @relation(fields: [driverId], references: [id], onDelete: Cascade)
 
   @@unique([driverId, vehicleType])
   @@index([status])
+}
+
+enum AdminRole {
+  OWNER
+  SUPERVISOR
+  SUPPORT
+  ANALYST
+}
+
+model AdminAccount {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         AdminRole @default(SUPPORT)
+  active       Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  auditLogs AdminAuditLog[]
+}
+
+model AdminActivationToken {
+  id        String    @id @default(cuid())
+  name      String
+  email     String    @unique
+  role      AdminRole
+  codeHash  String
+  expiresAt DateTime
+  attempts  Int       @default(0)
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([expiresAt])
+}
+
+model AdminAuditLog {
+  id           String   @id @default(cuid())
+  actorId      String?
+  actorEmail   String
+  action       String
+  entityType   String
+  entityId     String?
+  previousData Json?
+  newData      Json?
+  reason       String?
+  createdAt    DateTime @default(now())
+
+  actor AdminAccount? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId, createdAt])
+  @@index([entityType, entityId])
 }

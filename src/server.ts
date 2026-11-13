@@ -1,11 +1,12 @@
-import { createHash, randomInt } from "crypto";
+import { createHash, randomInt, timingSafeEqual } from "crypto";
 import express from "express";
+import path from "path";
 import cors from "cors";
 import dotenv from "dotenv";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { v2 as cloudinary } from "cloudinary";
-import { PrismaClient, Role, RideStatus, VehicleType, DocumentStatus, DriverDocumentType, LicenseCategory } from "@prisma/client";
+import { PrismaClient, Role, RideStatus, VehicleType, DocumentStatus, DriverDocumentType, LicenseCategory, AdminRole } from "@prisma/client";
 
 dotenv.config();
 cloudinary.config({ cloud_name: process.env.CLOUDINARY_CLOUD_NAME, api_key: process.env.CLOUDINARY_API_KEY, api_secret: process.env.CLOUDINARY_API_SECRET, secure: true });
@@ -13,6 +14,7 @@ const app = express();
 const prisma = new PrismaClient();
 app.use(cors());
 app.use(express.json({ limit: "12mb" }));
+app.use(express.static(path.join(process.cwd(), "public")));
 
 const secret = process.env.JWT_SECRET || "development-secret";
 const BORA_FIXED_COMMISSION = Number(process.env.BORA_FIXED_COMMISSION || 1);
@@ -51,6 +53,21 @@ async function auth(req: express.Request, res: express.Response, next: express.N
 function role(req: express.Request, r: Role) {
   return (req as any).user?.role === r;
 }
+async function adminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const h = req.headers.authorization;
+  if (!h?.startsWith("Bearer ")) return res.status(401).json({ error: "Não autorizado" });
+  try {
+    const token = jwt.verify(h.slice(7), secret) as { adminId?: string; scope?: string };
+    if (!token.adminId || token.scope !== "admin") return res.status(401).json({ error: "Token administrativo inválido" });
+    const admin = await prisma.adminAccount.findUnique({ where: { id: token.adminId } });
+    if (!admin || !admin.active) return res.status(401).json({ error: "Conta administrativa inativa" });
+    (req as any).admin = admin;
+    next();
+  } catch {
+    return res.status(401).json({ error: "Sessão administrativa inválida" });
+  }
+}
+
 
 async function getDriverEligibility(userId: string, vehicleType: VehicleType) {
   const driver = await prisma.driver.findUnique({
@@ -1206,8 +1223,168 @@ app.post("/api/drivers/vehicles", auth, async (req, res) => {
   }
 });
 
-app.get("/api/admin/driver-review/pending", auth, async (req, res) => {
-  if (!role(req, Role.ADMIN)) {
+
+
+const adminRateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function adminRateLimit(bucket: string, max: number, windowMs: number) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const now = Date.now();
+    for (const [key, value] of adminRateBuckets) {
+      if (value.resetAt <= now) adminRateBuckets.delete(key);
+    }
+    const ip = req.get("X-Real-IP") || req.socket.remoteAddress || "unknown";
+    const key = `${bucket}:${ip}`;
+    let entry = adminRateBuckets.get(key);
+    if (!entry || entry.resetAt <= now) {
+      entry = { count: 0, resetAt: now + windowMs };
+      adminRateBuckets.set(key, entry);
+    }
+    if (entry.count >= max) {
+      res.setHeader("Retry-After", String(Math.ceil((entry.resetAt - now) / 1000)));
+      return res.status(429).json({ error: "Muitas tentativas. Aguarde antes de tentar novamente." });
+    }
+    entry.count++;
+    next();
+  };
+}
+
+const ADMIN_OWNER_EMAIL = "boratecmob@gmail.com";
+
+function adminSecretReady() {
+  return process.env.NODE_ENV !== "production" ||
+    (secret !== "development-secret" && secret.length >= 32);
+}
+
+app.post("/api/admin/activation/request", adminRateLimit("activation-request", 3, 10 * 60 * 1000), async (req, res) => {
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const name = String(req.body.name || "").trim();
+  if (email !== ADMIN_OWNER_EMAIL)
+    return res.status(403).json({ error: "E-mail não autorizado." });
+  if (name.length < 2 || name.length > 100)
+    return res.status(400).json({ error: "Nome inválido." });
+  if (!adminSecretReady())
+    return res.status(503).json({ error: "Segredo JWT de produção não configurado corretamente." });
+
+  try {
+    if (await prisma.adminAccount.count({ where: { role: AdminRole.OWNER } }))
+      return res.status(409).json({ error: "O OWNER já foi ativado." });
+
+    const previous = await prisma.adminActivationToken.findUnique({ where: { email } });
+    if (previous && Date.now() - previous.createdAt.getTime() < 60000)
+      return res.status(429).json({ error: "Aguarde um minuto para solicitar outro código." });
+
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) return res.status(503).json({ error: "Serviço de e-mail indisponível." });
+
+    const code = String(randomInt(100000, 1000000));
+    const codeHash = createHash("sha256").update(`${code}:${secret}`).digest("hex");
+    const now = new Date();
+    await prisma.adminActivationToken.upsert({
+      where: { email },
+      update: { name, role: AdminRole.OWNER, codeHash, expiresAt: new Date(Date.now() + 15 * 60000), attempts: 0, usedAt: null, createdAt: now },
+      create: { name, email, role: AdminRole.OWNER, codeHash, expiresAt: new Date(Date.now() + 15 * 60000) }
+    });
+
+    const envio = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: "BORA <nao-responda@boramobilidadeurbana.com.br>",
+        to: [ADMIN_OWNER_EMAIL],
+        subject: "Código de ativação administrativa - BORA",
+        html: `<div style="font-family:Arial,sans-serif"><h2>Ativação administrativa BORA</h2><p>Seu código:</p><h1>${code}</h1><p>Expira em 15 minutos. Se não solicitou, ignore este e-mail.</p></div>`
+      })
+    });
+    if (!envio.ok) {
+      console.error("Falha no envio de ativação pelo Resend:", await envio.text());
+      await prisma.adminActivationToken.update({ where: { email }, data: { expiresAt: new Date() } });
+      return res.status(503).json({ error: "Não foi possível enviar o código." });
+    }
+    return res.json({ message: "Se o endereço estiver autorizado, o código será enviado." });
+  } catch (error) {
+    console.error("Erro ao solicitar ativação OWNER:", error);
+    return res.status(500).json({ error: "Não foi possível solicitar a ativação." });
+  }
+});
+
+app.post("/api/admin/activation/confirm", adminRateLimit("activation-confirm", 5, 15 * 60 * 1000), async (req, res) => {
+  const code = String(req.body.code || "").trim();
+  const password = String(req.body.password || "");
+  if (!/^\d{6}$/.test(code) || password.length < 12 || Buffer.byteLength(password, "utf8") > 72)
+    return res.status(400).json({ error: "Código inválido ou senha fora dos requisitos." });
+  if (!adminSecretReady())
+    return res.status(503).json({ error: "Segredo JWT de produção não configurado corretamente." });
+
+  try {
+    const token = await prisma.adminActivationToken.findUnique({ where: { email: ADMIN_OWNER_EMAIL } });
+    if (!token || token.usedAt || token.expiresAt <= new Date() || token.attempts >= 5)
+      return res.status(400).json({ error: "Código inválido, expirado ou bloqueado." });
+
+    const received = createHash("sha256").update(`${code}:${secret}`).digest("hex");
+    const valid = timingSafeEqual(Buffer.from(received, "hex"), Buffer.from(token.codeHash, "hex"));
+    if (!valid) {
+      await prisma.adminActivationToken.updateMany({
+        where: { id: token.id, usedAt: null, attempts: { lt: 5 } },
+        data: { attempts: { increment: 1 } }
+      });
+      return res.status(400).json({ error: "Código inválido, expirado ou bloqueado." });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 12);
+    const created = await prisma.$transaction(async tx => {
+      const claimed = await tx.adminActivationToken.updateMany({
+        where: { id: token.id, codeHash: token.codeHash, usedAt: null, expiresAt: { gt: new Date() }, attempts: { lt: 5 } },
+        data: { usedAt: new Date() }
+      });
+      if (!claimed.count) throw new Error("ACTIVATION_INVALID");
+      if (await tx.adminAccount.count({ where: { role: AdminRole.OWNER } }))
+        throw new Error("OWNER_ALREADY_EXISTS");
+
+      const admin = await tx.adminAccount.create({
+        data: { name: token.name, email: ADMIN_OWNER_EMAIL, passwordHash, role: AdminRole.OWNER, active: true }
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          actorId: admin.id, actorEmail: ADMIN_OWNER_EMAIL,
+          action: "ACTIVATE", entityType: "ADMIN_ACCOUNT", entityId: admin.id,
+          newData: { role: "OWNER", active: true }
+        }
+      });
+      return admin;
+    });
+    return res.status(201).json({ message: "Conta OWNER ativada. Faça o login administrativo.", admin: { id: created.id, name: created.name, email: created.email, role: created.role } });
+  } catch (error) {
+    if ((error as any)?.code === "P2002")
+      return res.status(409).json({ error: "O OWNER já foi ativado." });
+    if (error instanceof Error && error.message === "OWNER_ALREADY_EXISTS")
+      return res.status(409).json({ error: "O OWNER já foi ativado." });
+    if (error instanceof Error && error.message === "ACTIVATION_INVALID")
+      return res.status(400).json({ error: "Código inválido, expirado ou bloqueado." });
+    console.error("Erro ao confirmar ativação OWNER:", error);
+    return res.status(500).json({ error: "Não foi possível ativar a conta." });
+  }
+});
+
+app.post("/api/admin/login", adminRateLimit("admin-login", 10, 15 * 60 * 1000), async (req, res) => {
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
+  if (!adminSecretReady())
+    return res.status(503).json({ error: "Segredo JWT de produção não configurado corretamente." });
+  try {
+    const admin = await prisma.adminAccount.findUnique({ where: { email } });
+    if (!admin || !admin.active || !(await bcrypt.compare(password, admin.passwordHash)))
+      return res.status(401).json({ error: "E-mail ou senha inválidos." });
+    const token = jwt.sign({ adminId: admin.id, scope: "admin" }, secret, { expiresIn: "8h" });
+    return res.json({ token, admin: { id: admin.id, name: admin.name, email: admin.email, role: admin.role } });
+  } catch (error) {
+    console.error("Erro no login administrativo:", error);
+    return res.status(500).json({ error: "Não foi possível realizar o login." });
+  }
+});
+
+app.get("/api/admin/driver-review/pending", adminAuth, async (req, res) => {
+  if (![AdminRole.OWNER, AdminRole.SUPERVISOR].includes((req as any).admin?.role)) {
     return res.status(403).json({ error: "Apenas administradores podem consultar análises." });
   }
 
@@ -1266,8 +1443,8 @@ app.get("/api/admin/driver-review/pending", auth, async (req, res) => {
   }
 });
 
-app.get("/api/admin/driver-review/:kind/:id/files", auth, async (req, res) => {
-  if (!role(req, Role.ADMIN)) {
+app.get("/api/admin/driver-review/:kind/:id/files", adminAuth, async (req, res) => {
+  if (![AdminRole.OWNER, AdminRole.SUPERVISOR].includes((req as any).admin?.role)) {
     return res.status(403).json({ error: "Apenas administradores podem visualizar documentos." });
   }
 
@@ -1358,8 +1535,8 @@ app.get("/api/admin/driver-review/:kind/:id/files", auth, async (req, res) => {
   }
 });
 
-app.patch("/api/admin/driver-review/:kind/:id", auth, async (req, res) => {
-  if (!role(req, Role.ADMIN)) {
+app.patch("/api/admin/driver-review/:kind/:id", adminAuth, async (req, res) => {
+  if (![AdminRole.OWNER, AdminRole.SUPERVISOR].includes((req as any).admin?.role)) {
     return res.status(403).json({ error: "Apenas administradores podem analisar cadastros." });
   }
 
@@ -1450,31 +1627,38 @@ app.patch("/api/admin/driver-review/:kind/:id", auth, async (req, res) => {
         }
       }
 
-      const result = await prisma.driverDocument.updateMany({
-        where: { id, status: DocumentStatus.PENDING },
-        data
+      const admin = (req as any).admin;
+      const updated = await prisma.$transaction(async (tx) => {
+        const result = await tx.driverDocument.updateMany({
+          where: { id, status: DocumentStatus.PENDING },
+          data
+        });
+        if (result.count === 0) return null;
+        const updated = await tx.driverDocument.findUnique({ where: { id } });
+        if (!updated) throw new Error("Documento não encontrado após atualização.");
+        await tx.adminAuditLog.create({
+          data: {
+            actorId: admin.id,
+            actorEmail: admin.email,
+            action: decision === "APPROVED" ? "APPROVE" : "REJECT",
+            entityType: "DRIVER_DOCUMENT",
+            entityId: id,
+            previousData: { status: "PENDING" },
+            newData: {
+              status: updated.status,
+              rejectionReason: updated.rejectionReason,
+              reviewedAt: updated.reviewedAt?.toISOString() ?? null
+            },
+            reason: decision === "REJECTED" ? reason : null
+          }
+        });
+        return updated;
       });
-
-      if (result.count === 0) {
+      if (!updated) {
         return res.status(409).json({
           error: "Este cadastro já foi analisado por outro administrador."
         });
       }
-
-      const updated = await prisma.driverDocument.findUnique({
-        where: { id },
-        select: {
-          id: true,
-          status: true,
-          rejectionReason: true,
-          reviewedAt: true
-        }
-      });
-
-      if (!updated) {
-        return res.status(404).json({ error: "Documento não encontrado." });
-      }
-
       return res.json({
         message: decision === "APPROVED" ? "Documento aprovado." : "Documento rejeitado.",
         id: updated.id,
@@ -1512,31 +1696,38 @@ app.patch("/api/admin/driver-review/:kind/:id", auth, async (req, res) => {
       });
     }
 
-    const result = await prisma.driverVehicle.updateMany({
-      where: { id, status: DocumentStatus.PENDING },
-      data
+    const admin = (req as any).admin;
+    const updated = await prisma.$transaction(async (tx) => {
+      const result = await tx.driverVehicle.updateMany({
+        where: { id, status: DocumentStatus.PENDING },
+        data
+      });
+      if (result.count === 0) return null;
+      const updated = await tx.driverVehicle.findUnique({ where: { id } });
+      if (!updated) throw new Error("Veículo não encontrado após atualização.");
+      await tx.adminAuditLog.create({
+        data: {
+          actorId: admin.id,
+          actorEmail: admin.email,
+          action: decision === "APPROVED" ? "APPROVE" : "REJECT",
+          entityType: "DRIVER_VEHICLE",
+          entityId: id,
+          previousData: { status: "PENDING" },
+          newData: {
+            status: updated.status,
+            rejectionReason: updated.rejectionReason,
+            reviewedAt: updated.reviewedAt?.toISOString() ?? null
+          },
+          reason: decision === "REJECTED" ? reason : null
+        }
+      });
+      return updated;
     });
-
-    if (result.count === 0) {
+    if (!updated) {
       return res.status(409).json({
         error: "Este cadastro já foi analisado por outro administrador."
       });
     }
-
-    const updated = await prisma.driverVehicle.findUnique({
-      where: { id },
-      select: {
-        id: true,
-        status: true,
-        rejectionReason: true,
-        reviewedAt: true
-      }
-    });
-
-    if (!updated) {
-      return res.status(404).json({ error: "Veículo não encontrado." });
-    }
-
     return res.json({
       message: decision === "APPROVED" ? "Veículo aprovado." : "Veículo rejeitado.",
       id: updated.id,
@@ -1547,6 +1738,177 @@ app.patch("/api/admin/driver-review/:kind/:id", auth, async (req, res) => {
   } catch (error) {
     console.error("Erro na análise administrativa:", error);
     return res.status(500).json({ error: "Não foi possível concluir a análise." });
+  }
+});
+
+
+
+app.get("/api/admin/staff", adminAuth, async (req, res) => {
+  const actor = (req as any).admin;
+  if (actor.role !== AdminRole.OWNER)
+    return res.status(403).json({ error: "Somente o OWNER pode gerenciar funcionários." });
+  try {
+    const staff = await prisma.adminAccount.findMany({
+      where: { role: { not: AdminRole.OWNER } },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, name: true, email: true, role: true, active: true, createdAt: true, updatedAt: true }
+    });
+    return res.json(staff);
+  } catch (error) {
+    console.error("Erro ao listar funcionários:", error);
+    return res.status(500).json({ error: "Não foi possível listar funcionários." });
+  }
+});
+
+app.post("/api/admin/staff", adminAuth, async (req, res) => {
+  const actor = (req as any).admin;
+  if (actor.role !== AdminRole.OWNER)
+    return res.status(403).json({ error: "Somente o OWNER pode cadastrar funcionários." });
+
+  const name = String(req.body.name || "").trim();
+  const email = String(req.body.email || "").trim().toLowerCase();
+  const password = String(req.body.password || "");
+  const role = req.body.role;
+  const allowed: AdminRole[] = [AdminRole.SUPERVISOR, AdminRole.SUPPORT, AdminRole.ANALYST];
+
+  if (name.length < 2 || name.length > 100 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+    return res.status(400).json({ error: "Nome ou e-mail inválido." });
+  if (!allowed.includes(role as AdminRole))
+    return res.status(400).json({ error: "Perfil administrativo inválido." });
+  if (password.length < 12 || Buffer.byteLength(password, "utf8") > 72)
+    return res.status(400).json({ error: "A senha deve ter pelo menos 12 caracteres e no máximo 72 bytes." });
+
+  try {
+    const passwordHash = await bcrypt.hash(password, 12);
+    const staff = await prisma.$transaction(async tx => {
+      const created = await tx.adminAccount.create({
+        data: { name, email, passwordHash, role: role as AdminRole },
+        select: { id: true, name: true, email: true, role: true, active: true, createdAt: true }
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          actorId: actor.id, actorEmail: actor.email,
+          action: "STAFF_CREATE", entityType: "ADMIN_ACCOUNT", entityId: created.id,
+          newData: { name, email, role, active: true }
+        }
+      });
+      return created;
+    });
+    return res.status(201).json(staff);
+  } catch (error: any) {
+    if (error?.code === "P2002")
+      return res.status(409).json({ error: "Já existe uma conta com esse e-mail." });
+    console.error("Erro ao cadastrar funcionário:", error);
+    return res.status(500).json({ error: "Não foi possível cadastrar funcionário." });
+  }
+});
+
+app.patch("/api/admin/staff/:id", adminAuth, async (req, res) => {
+  const actor = (req as any).admin;
+  if (actor.role !== AdminRole.OWNER)
+    return res.status(403).json({ error: "Somente o OWNER pode alterar funcionários." });
+
+  const id = String(req.params.id || "");
+  const role = req.body.role;
+  const active = req.body.active;
+  const reason = String(req.body.reason || "").trim();
+  const allowed: AdminRole[] = [AdminRole.SUPERVISOR, AdminRole.SUPPORT, AdminRole.ANALYST];
+
+  if (!id || (role === undefined && active === undefined))
+    return res.status(400).json({ error: "Informe o funcionário e a alteração desejada." });
+  if (role !== undefined && !allowed.includes(role as AdminRole))
+    return res.status(400).json({ error: "Perfil inválido. OWNER não pode ser concedido por esta rota." });
+  if (active !== undefined && typeof active !== "boolean")
+    return res.status(400).json({ error: "O campo active deve ser verdadeiro ou falso." });
+  if (reason.length > 500)
+    return res.status(400).json({ error: "Motivo muito longo." });
+
+  try {
+    const updated = await prisma.$transaction(async tx => {
+      const current = await tx.adminAccount.findUnique({ where: { id } });
+      if (!current) throw new Error("STAFF_NOT_FOUND");
+      if (current.role === AdminRole.OWNER) throw new Error("OWNER_PROTECTED");
+
+      const changed = await tx.adminAccount.update({
+        where: { id },
+        data: {
+          ...(role !== undefined ? { role: role as AdminRole } : {}),
+          ...(active !== undefined ? { active } : {})
+        },
+        select: { id: true, name: true, email: true, role: true, active: true, updatedAt: true }
+      });
+      await tx.adminAuditLog.create({
+        data: {
+          actorId: actor.id, actorEmail: actor.email,
+          action: "STAFF_UPDATE", entityType: "ADMIN_ACCOUNT", entityId: id,
+          previousData: { name: current.name, email: current.email, role: current.role, active: current.active },
+          newData: { name: changed.name, email: changed.email, role: changed.role, active: changed.active },
+          reason: reason || null
+        }
+      });
+      return changed;
+    });
+    return res.json(updated);
+  } catch (error: any) {
+    if (error?.message === "STAFF_NOT_FOUND")
+      return res.status(404).json({ error: "Funcionário não encontrado." });
+    if (error?.message === "OWNER_PROTECTED")
+      return res.status(403).json({ error: "A conta OWNER não pode ser alterada por esta rota." });
+    console.error("Erro ao alterar funcionário:", error);
+    return res.status(500).json({ error: "Não foi possível alterar funcionário." });
+  }
+});
+
+app.get("/api/admin/audit-logs", adminAuth, async (req, res) => {
+  const admin = (req as any).admin;
+  if (admin.role !== AdminRole.OWNER) {
+    return res.status(403).json({ error: "Apenas o OWNER pode consultar a auditoria." });
+  }
+
+  const from = typeof req.query.from === "string" ? new Date(req.query.from) : undefined;
+  const to = typeof req.query.to === "string" ? new Date(req.query.to) : undefined;
+  if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) {
+    return res.status(400).json({ error: "Período inválido." });
+  }
+  if (from && to && from > to) {
+    return res.status(400).json({ error: "A data inicial deve ser anterior à final." });
+  }
+
+  const page = Math.max(1, Number.parseInt(String(req.query.page || "1"), 10) || 1);
+  const limit = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit || "50"), 10) || 50));
+  const actorEmail = typeof req.query.actorEmail === "string" ? req.query.actorEmail.trim() : "";
+  const action = typeof req.query.action === "string" ? req.query.action.trim() : "";
+  const entityType = typeof req.query.entityType === "string" ? req.query.entityType.trim() : "";
+
+  try {
+    const where: any = {};
+    if (from || to) where.createdAt = {
+      ...(from ? { gte: from } : {}),
+      ...(to ? { lte: to } : {})
+    };
+    if (actorEmail) where.actorEmail = { contains: actorEmail, mode: "insensitive" };
+    if (action) where.action = action;
+    if (entityType) where.entityType = entityType;
+
+    const [logs, total] = await Promise.all([
+      prisma.adminAuditLog.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit,
+        select: {
+          id: true, actorId: true, actorEmail: true, action: true,
+          entityType: true, entityId: true, previousData: true,
+          newData: true, reason: true, createdAt: true
+        }
+      }),
+      prisma.adminAuditLog.count({ where })
+    ]);
+
+    return res.json({ logs, total, page, limit, totalPages: Math.ceil(total / limit) });
+  } catch (error) {
+    console.error("Erro ao consultar auditoria administrativa:", error);
+    return res.status(500).json({ error: "Não foi possível consultar a auditoria." });
   }
 });
 
@@ -1932,6 +2294,11 @@ app.post("/api/rides/:id/messages", auth, async (req, res) => {
 
   res.status(201).json(message);
 });
+
+if (process.env.NODE_ENV === "production" && (!process.env.JWT_SECRET || process.env.JWT_SECRET.trim().length < 32)) {
+  console.error("ERRO: configure JWT_SECRET com pelo menos 32 caracteres antes de iniciar em produção.");
+  process.exit(1);
+}
 
 const port = Number(process.env.PORT || 3000);
 app.listen(port, () => console.log("BORA Backend v2.2 Asaas rodando na porta " + port));
