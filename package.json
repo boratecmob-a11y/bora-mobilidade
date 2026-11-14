@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch server.ts",
-    "build": "cp server.ts src/server.ts && tsc && mkdir -p dist/public && cp -R public/. dist/public/ && chmod -R a+rX dist/public",
+    "build": "cp server.ts src/server.ts && tsc && mkdir -p dist/public && cp -R public/. dist/public/ && chmod -R a+rX dist",
     "start": "node dist/server.js"
   },
   "dependencies": {
