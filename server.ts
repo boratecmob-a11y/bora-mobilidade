@@ -2298,8 +2298,75 @@ app.post("/api/rides/:id/messages", auth, async (req, res) => {
 app.post("/api/support/tickets",auth,async(req,res)=>{try{const userId=(req as any).user.id,userRole=(req as any).user.role;if(![Role.PASSENGER,Role.DRIVER].includes(userRole))return res.status(403).json({error:"Perfil não autorizado."});const subject=String(req.body?.subject||"").trim(),content=String(req.body?.content||"").trim(),category=String(req.body?.category||"").trim();if(!subject||!content)return res.status(400).json({error:"Informe o assunto e a mensagem."});if(subject.length>120||content.length>3000||category.length>60)return res.status(400).json({error:"Limite de caracteres excedido."});const user=await prisma.user.findUnique({where:{id:userId},select:{name:true}});if(!user)return res.status(404).json({error:"Usuário não encontrado."});const ticket=await prisma.$transaction(async tx=>{const created=await tx.supportTicket.create({data:{userId,subject,category:category||null}});await tx.supportMessage.create({data:{ticketId:created.id,senderType:"USER",senderUserId:userId,senderName:user.name,content}});return tx.supportTicket.findUnique({where:{id:created.id},include:{messages:{orderBy:{createdAt:"asc"}}}})});return res.status(201).json(ticket)}catch(error){console.error("Erro ao abrir chamado:",error);return res.status(500).json({error:"Não foi possível abrir o chamado."})}});
 app.get("/api/support/tickets",auth,async(req,res)=>{try{const userId=(req as any).user.id;const tickets=await prisma.supportTicket.findMany({where:{userId},orderBy:{updatedAt:"desc"},include:{messages:{orderBy:{createdAt:"asc"}}}});return res.json(tickets)}catch(error){console.error("Erro ao listar chamados:",error);return res.status(500).json({error:"Não foi possível listar os chamados."})}});
 
+
+app.post("/api/support/tickets/:id/messages", auth, async (req, res) => {
+  try {
+    const userId = (req as any).user.id;
+    const role = (req as any).user.role;
+    if (![Role.PASSENGER, Role.DRIVER].includes(role))
+      return res.status(403).json({ error: "Perfil não autorizado." });
+
+    const content = String(req.body?.content || "").trim();
+    if (!content || content.length > 3000)
+      return res.status(400).json({ error: "Mensagem vazia ou acima de 3000 caracteres." });
+
+    const ticket = await prisma.supportTicket.findFirst({
+      where: { id: req.params.id, userId }
+    });
+    if (!ticket) return res.status(404).json({ error: "Chamado não encontrado." });
+    if (ticket.status === "CLOSED")
+      return res.status(409).json({ error: "Este chamado está encerrado." });
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId }, select: { name: true }
+    });
+    if (!user) return res.status(404).json({ error: "Usuário não encontrado." });
+
+    const message = await prisma.$transaction(async (tx) => {
+      const created = await tx.supportMessage.create({
+        data: {
+          ticketId: ticket.id,
+          senderType: "USER",
+          senderUserId: userId,
+          senderName: user.name,
+          content
+        }
+      });
+      await tx.supportTicket.update({
+        where: { id: ticket.id },
+        data: { status: ticket.status }
+      });
+      return created;
+    });
+    return res.status(201).json(message);
+  } catch (error) {
+    console.error("Erro ao responder chamado:", error);
+    return res.status(500).json({ error: "Não foi possível enviar a resposta." });
+  }
+});
+
+app.get("/api/admin/support/assignees", adminAuth, async (req, res) => {
+  try {
+    const actor = (req as any).admin;
+    if (![AdminRole.OWNER, AdminRole.SUPERVISOR].includes(actor.role))
+      return res.status(403).json({ error: "Sem permissão para listar atendentes." });
+
+    const assignees = await prisma.adminAccount.findMany({
+      where: { role: AdminRole.SUPPORT, active: true },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true }
+    });
+
+    return res.json(assignees);
+  } catch (error) {
+    console.error("Erro ao listar atendentes:", error);
+    return res.status(500).json({ error: "Não foi possível listar os atendentes." });
+  }
+});
+
 app.get("/api/admin/support/tickets", adminAuth, async (req, res) => {
   try {
+    const actor = (req as any).admin;
     const status = String(req.query.status || "");
     const userRole = String(req.query.role || "");
     if (status && !["OPEN", "IN_PROGRESS", "CLOSED"].includes(status))
@@ -2310,6 +2377,7 @@ app.get("/api/admin/support/tickets", adminAuth, async (req, res) => {
     const where: any = {};
     if (status) where.status = status;
     if (userRole) where.user = { role: userRole };
+    if (actor.role === AdminRole.SUPPORT) where.assignedAdminId = actor.id;
 
     const tickets = await prisma.supportTicket.findMany({
       where,
@@ -2329,6 +2397,7 @@ app.get("/api/admin/support/tickets", adminAuth, async (req, res) => {
 });
 
 app.get("/api/admin/support/tickets/:id", adminAuth, async (req, res) => {
+  const actor = (req as any).admin;
   try {
     const ticket = await prisma.supportTicket.findUnique({
       where: { id: req.params.id },
@@ -2338,7 +2407,8 @@ app.get("/api/admin/support/tickets/:id", adminAuth, async (req, res) => {
         messages: { orderBy: { createdAt: "asc" } }
       }
     });
-    if (!ticket) return res.status(404).json({ error: "Chamado não encontrado." });
+    if (!ticket || (actor.role === AdminRole.SUPPORT && ticket.assignedAdminId !== actor.id))
+      return res.status(404).json({ error: "Chamado não encontrado." });
     return res.json(ticket);
   } catch (error) {
     console.error("Erro ao consultar chamado:", error);
@@ -2357,7 +2427,8 @@ app.post("/api/admin/support/tickets/:id/messages", adminAuth, async (req, res) 
       return res.status(400).json({ error: "Mensagem vazia ou acima de 3000 caracteres." });
 
     const ticket = await prisma.supportTicket.findUnique({ where: { id: req.params.id } });
-    if (!ticket) return res.status(404).json({ error: "Chamado não encontrado." });
+    if (!ticket || (actor.role === AdminRole.SUPPORT && ticket.assignedAdminId !== actor.id))
+      return res.status(404).json({ error: "Chamado não encontrado." });
     if (ticket.status === "CLOSED")
       return res.status(409).json({ error: "Este chamado está encerrado." });
 
@@ -2419,12 +2490,12 @@ app.patch("/api/admin/support/tickets/:id", adminAuth, async (req, res) => {
 
     if (hasAssignment) {
       const assignedAdminId = req.body.assignedAdminId;
-      if (actor.role === AdminRole.SUPPORT && assignedAdminId !== actor.id && assignedAdminId !== null)
+      if (actor.role === AdminRole.SUPPORT && assignedAdminId !== actor.id)
         return res.status(403).json({ error: "SUPPORT só pode atribuir o chamado a si próprio." });
 
       if (assignedAdminId !== null) {
         const target = await prisma.adminAccount.findUnique({ where: { id: assignedAdminId } });
-        if (!target || !target.active)
+        if (!target || !target.active || target.role !== AdminRole.SUPPORT)
           return res.status(400).json({ error: "Funcionário não encontrado ou inativo." });
       }
       data.assignedAdminId = assignedAdminId;
@@ -2436,6 +2507,8 @@ app.patch("/api/admin/support/tickets/:id", adminAuth, async (req, res) => {
     const updated = await prisma.$transaction(async (tx) => {
       const previous = await tx.supportTicket.findUnique({ where: { id: req.params.id } });
       if (!previous) throw new Error("TICKET_NOT_FOUND");
+      if (actor.role === AdminRole.SUPPORT && previous.assignedAdminId !== actor.id)
+        throw new Error("TICKET_FORBIDDEN");
 
       const result = await tx.supportTicket.update({
         where: { id: req.params.id },
@@ -2458,6 +2531,8 @@ app.patch("/api/admin/support/tickets/:id", adminAuth, async (req, res) => {
     return res.json(updated);
   } catch (error) {
     if (error instanceof Error && error.message === "TICKET_NOT_FOUND")
+      return res.status(404).json({ error: "Chamado não encontrado." });
+    if (error instanceof Error && error.message === "TICKET_FORBIDDEN")
       return res.status(404).json({ error: "Chamado não encontrado." });
     console.error("Erro ao atualizar chamado:", error);
     return res.status(500).json({ error: "Não foi possível atualizar o chamado." });
