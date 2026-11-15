@@ -1859,6 +1859,103 @@ app.patch("/api/admin/staff/:id", adminAuth, async (req, res) => {
   }
 });
 
+
+app.get("/api/admin/passengers", adminAuth, async (req, res) => {
+  const admin = (req as any).admin;
+  if (![AdminRole.OWNER, AdminRole.SUPERVISOR].includes(admin?.role)) {
+    return res.status(403).json({ error: "Apenas administradores podem consultar passageiros." });
+  }
+
+  try {
+    const passengers = await prisma.user.findMany({
+      where: { role: Role.PASSENGER, deletedAt: null },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true, name: true, email: true, cpfCnpj: true,
+        phone: true, createdAt: true
+      }
+    });
+
+    if (!passengers.length) return res.json([]);
+
+    const approvals = await prisma.adminAuditLog.findMany({
+      where: {
+        entityType: "PASSENGER",
+        action: "APPROVE",
+        entityId: { in: passengers.map(p => p.id) }
+      },
+      orderBy: { createdAt: "desc" },
+      select: { entityId: true, createdAt: true }
+    });
+
+    const approved = new Map<string, Date>();
+    for (const log of approvals) {
+      if (log.entityId && !approved.has(log.entityId)) {
+        approved.set(log.entityId, log.createdAt);
+      }
+    }
+
+    return res.json(passengers.map(p => ({
+      ...p,
+      approved: approved.has(p.id),
+      approvedAt: approved.get(p.id) || null
+    })));
+  } catch (error) {
+    console.error("Erro ao consultar passageiros:", error);
+    return res.status(500).json({ error: "Não foi possível consultar passageiros." });
+  }
+});
+
+app.patch("/api/admin/passengers/:id/approve", adminAuth, async (req, res) => {
+  const admin = (req as any).admin;
+  if (![AdminRole.OWNER, AdminRole.SUPERVISOR].includes(admin?.role)) {
+    return res.status(403).json({ error: "Apenas administradores podem aprovar passageiros." });
+  }
+
+  try {
+    const result = await prisma.$transaction(async tx => {
+      const passenger = await tx.user.findFirst({
+        where: { id: req.params.id, role: Role.PASSENGER, deletedAt: null },
+        select: { id: true }
+      });
+
+      if (!passenger) return { notFound: true };
+
+      const existing = await tx.adminAuditLog.findFirst({
+        where: { entityType: "PASSENGER", entityId: passenger.id, action: "APPROVE" },
+        select: { id: true, createdAt: true }
+      });
+
+      if (existing) {
+        return { approved: true, alreadyApproved: true, approvedAt: existing.createdAt };
+      }
+
+      const log = await tx.adminAuditLog.create({
+        data: {
+          actorId: admin.id,
+          actorEmail: admin.email,
+          action: "APPROVE",
+          entityType: "PASSENGER",
+          entityId: passenger.id,
+          previousData: { status: "PENDING" },
+          newData: { status: "APPROVED" }
+        }
+      });
+
+      return { approved: true, alreadyApproved: false, approvedAt: log.createdAt };
+    });
+
+    if ("notFound" in result) {
+      return res.status(404).json({ error: "Passageiro não encontrado." });
+    }
+
+    return res.json(result);
+  } catch (error) {
+    console.error("Erro ao aprovar passageiro:", error);
+    return res.status(500).json({ error: "Não foi possível registrar a aprovação." });
+  }
+});
+
 app.get("/api/admin/audit-logs", adminAuth, async (req, res) => {
   const admin = (req as any).admin;
   if (admin.role !== AdminRole.OWNER) {

@@ -28,7 +28,7 @@ table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:10px;bor
 <button type="submit">Entrar</button><div id="loginMsg" class="msg"></div></form>
 </section>
 <section id="app" class="hidden">
-<nav><button onclick="show(&quot;staff&quot;)">Funcionários</button><button onclick="show(&quot;audit&quot;)">Auditoria</button><button onclick="show(&quot;support&quot;)">Suporte</button></nav>
+<nav><button onclick="show(&quot;staff&quot;)">Funcionários</button><button id="passengersTab" onclick="show(&quot;passengers&quot;)">Passageiros</button><button id="driversTab" onclick="show(&quot;drivers&quot;)">Motoristas</button><button onclick="show(&quot;audit&quot;)">Auditoria</button><button onclick="show(&quot;support&quot;)">Suporte</button></nav>
 <section id="staff" class="card">
 <h2>Gestão de funcionários</h2>
 <form id="createForm" onsubmit="createStaff(event)">
@@ -38,6 +38,19 @@ table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:10px;bor
 <div><label>Perfil</label><select id="newRole"><option>SUPPORT</option><option>ANALYST</option><option>SUPERVISOR</option></select></div></div>
 <button type="submit">Cadastrar funcionário</button></form>
 <div id="staffMsg" class="msg"></div><div id="staffList">Carregando...</div>
+</section>
+<section id="passengers" class="card hidden">
+<h2>Gestão de passageiros</h2>
+<button onclick="loadPassengers()">Atualizar passageiros</button>
+<div id="passengerMsg" class="msg"></div>
+<div id="passengerList">Clique em Atualizar passageiros para carregar.</div>
+</section>
+<section id="drivers" class="card hidden">
+<h2>Análise de motoristas</h2>
+<button onclick="loadDriverReviews()">Atualizar motoristas</button>
+<div id="driverMsg" class="msg"></div>
+<div id="driverList">Clique em Atualizar motoristas para carregar.</div>
+<div id="driverFiles"></div>
 </section>
 <section id="audit" class="card hidden"><h2>Registro de auditoria</h2><button onclick="loadAudit()">Atualizar</button><div id="auditList">Carregando...</div></section>
 <section id="support" class="card hidden"><h2>Atendimento e suporte</h2><div class="grid"><div><label>Situação</label><select id="ticketStatus"><option value="">Todas</option><option value="OPEN">Aberto</option><option value="IN_PROGRESS">Em atendimento</option><option value="CLOSED">Encerrado</option></select></div><div><label>Tipo de usuário</label><select id="ticketRole"><option value="">Todos</option><option value="PASSENGER">Passageiros</option><option value="DRIVER">Motoristas</option></select></div></div><button onclick="loadTickets()">Buscar chamados</button><div id="ticketMsg" class="msg"></div><div id="ticketList">Use Buscar chamados para carregar.</div><div id="ticketDetail" class="card hidden"><h3 id="ticketTitle">Conversa</h3><div class="grid" id="ticketControls">
@@ -57,17 +70,122 @@ table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:10px;bor
 <div id="ticketMessages"></div><div class="grid"><label for="ticketReply">Responder ao usuário</label><textarea id="ticketReply" rows="4" placeholder="Digite sua resposta..."></textarea><button onclick="sendTicketReply()">Enviar resposta</button><div id="ticketReplyMsg" class="msg"></div></div><button class="dark" onclick="closeTicket()">Fechar conversa</button></div></section></section></main>
 <script>
 let token=sessionStorage.getItem("bora_admin_token");
+let adminRole=sessionStorage.getItem("bora_admin_role")||"";
 const $=id=>document.getElementById(id);
 async function api(url,options={}){const r=await fetch(url,{...options,headers:{"Content-Type":"application/json","Authorization":"Bearer "+token,...options.headers}});const data=await r.json().catch(()=>({}));if(r.status===401){logout();throw Error("Sessão encerrada. Entre novamente.")}if(!r.ok)throw Error(data.error||"Falha na operação");return data}
-function show(id){["staff","audit","support"].forEach(x=>$(x).classList.toggle("hidden",id!==x));if(id==="staff")loadStaff();if(id==="audit")loadAudit();if(id==="support")loadTickets()}
-function start(){const ok=!!token;$("login").classList.toggle("hidden",ok);$("app").classList.toggle("hidden",!ok);$("logout").classList.toggle("hidden",!ok);if(ok)loadStaff()}
-function logout(){sessionStorage.removeItem("bora_admin_token");token=null;start()}
-async function login(e){e.preventDefault();$("loginMsg").textContent="";try{const d=await fetch("/api/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:$("email").value,password:$("password").value})}).then(async r=>{let x=await r.json();if(!r.ok)throw Error(x.error);return x});token=d.token;sessionStorage.setItem("bora_admin_token",token);$("password").value="";start()}catch(x){$("loginMsg").textContent=x.message}}
+function show(id){["staff","passengers","drivers","audit","support"].forEach(x=>$(x).classList.toggle("hidden",id!==x));if(id==="staff")loadStaff();if(id==="passengers")loadPassengers();if(id==="drivers")loadDriverReviews();if(id==="audit")loadAudit();if(id==="support")loadTickets()}
+function start(){const ok=!!token;const canReview=["OWNER","SUPERVISOR"].includes(adminRole);$("login").classList.toggle("hidden",ok);$("app").classList.toggle("hidden",!ok);$("logout").classList.toggle("hidden",!ok);$("passengersTab").classList.toggle("hidden",!canReview);$("driversTab").classList.toggle("hidden",!canReview);if(ok)loadStaff()}
+function logout(){sessionStorage.removeItem("bora_admin_token");sessionStorage.removeItem("bora_admin_role");token=null;adminRole="";start()}
+async function login(e){e.preventDefault();$("loginMsg").textContent="";try{const d=await fetch("/api/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:$("email").value,password:$("password").value})}).then(async r=>{let x=await r.json();if(!r.ok)throw Error(x.error);return x});token=d.token;adminRole=d.admin.role;sessionStorage.setItem("bora_admin_token",token);sessionStorage.setItem("bora_admin_role",adminRole);$("password").value="";start()}catch(x){$("loginMsg").textContent=x.message}}
 async function loadStaff(){try{const a=await api("/api/admin/staff");$("staffList").innerHTML="<table><tr><th>Nome</th><th>E-mail</th><th>Perfil</th><th>Status</th><th>Ações</th></tr>"+a.map(x=>`<tr><td>${esc(x.name)}</td><td>${esc(x.email)}</td><td>${x.role}</td><td>${x.active?"Ativo":"Bloqueado"}</td><td><button onclick="editStaff('${x.id}','${x.role}',${x.active})">Alterar</button></td></tr>`).join("")+"</table>"}catch(e){$("staffList").textContent=e.message}}
 async function createStaff(e){e.preventDefault();try{await api("/api/admin/staff",{method:"POST",body:JSON.stringify({name:$("newName").value,email:$("newEmail").value,password:$("newPassword").value,role:$("newRole").value})});$("createForm").reset();$("staffMsg").textContent="Funcionário cadastrado.";loadStaff()}catch(x){$("staffMsg").textContent=x.message}}
 async function editStaff(id,role,active){const r=prompt("Novo perfil: SUPERVISOR, SUPPORT ou ANALYST. Deixe vazio para manter.",role);if(r===null)return;const a=confirm("Conta atualmente "+(active?"ativa":"bloqueada")+". OK = ativar; Cancelar = bloquear.");const reason=prompt("Motivo da alteração:")||"";const body={active:a,reason};if(r.trim())body.role=r.trim().toUpperCase();try{await api("/api/admin/staff/"+id,{method:"PATCH",body:JSON.stringify(body)});loadStaff()}catch(e){alert(e.message)}}
 async function loadAudit(){try{const d=await api("/api/admin/audit-logs");$("auditList").innerHTML="<p>Total: "+d.total+"</p><table><tr><th>Data</th><th>Responsável</th><th>Ação</th><th>Registro</th><th>Motivo</th></tr>"+d.logs.map(x=>`<tr><td>${new Date(x.createdAt).toLocaleString("pt-BR")}</td><td>${esc(x.actorEmail)}</td><td>${esc(x.action)}</td><td>${esc(x.entityType)} ${esc(x.entityId||"")}</td><td>${esc(x.reason||"")}</td></tr>`).join("")+"</table>"}catch(e){$("auditList").textContent=e.message}}
 async function loadTickets(){const box=$("ticketList");$("ticketMsg").textContent="";box.textContent="Carregando chamados...";try{const q=new URLSearchParams();if($("ticketStatus").value)q.set("status",$("ticketStatus").value);if($("ticketRole").value)q.set("role",$("ticketRole").value);const data=await api("/api/admin/support/tickets?"+q.toString());if(!data.length){box.textContent="Nenhum chamado encontrado.";return}box.innerHTML="<table><tr><th>Assunto</th><th>Usuário</th><th>Tipo</th><th>Status</th><th>Mensagens</th><th>Atualizado</th></tr>"+data.map(x=>"<tr><td><button class=\"dark\" data-ticket=\""+encodeURIComponent(x.id)+"\" onclick=\"openTicket(this.dataset.ticket)\">"+esc(x.subject)+"</button></td><td>"+esc(x.user?.name)+"</td><td>"+(x.user?.role==="DRIVER"?"Motorista":"Passageiro")+"</td><td>"+esc(x.status)+"</td><td>"+esc(x._count?.messages??0)+"</td><td>"+new Date(x.updatedAt).toLocaleString("pt-BR")+"</td></tr>").join("")+"</table>"}catch(e){box.textContent=e.message}}async function openTicket(id){window.currentSupportTicketId=id;const detail=$("ticketDetail");detail.classList.remove("hidden");$("ticketTitle").textContent="Carregando conversa...";const area=$("ticketMessages");area.replaceChildren();try{const t=await api("/api/admin/support/tickets/"+encodeURIComponent(id));$("ticketTitle").textContent=t.subject+" — "+(t.user?.role==="DRIVER"?"Motorista":"Passageiro")+": "+(t.user?.name||"");$("ticketNewStatus").value=t.status;window.currentSupportAssignedAdminId=t.assignedAdminId||null;const assigneeBox=$("ticketAssigneeBox");const assigneeSelect=$("ticketAssignee");assigneeBox.classList.add("hidden");assigneeSelect.replaceChildren(new Option("Sem responsável",""));try{const assignees=await api("/api/admin/support/assignees");for(const a of assignees)assigneeSelect.add(new Option(a.name,a.id));if(t.assignedAdminId&&!assignees.some(a=>a.id===t.assignedAdminId))assigneeSelect.add(new Option(t.assignedAdmin?.name||"Responsável atual",t.assignedAdminId));assigneeSelect.value=t.assignedAdminId||"";assigneeBox.classList.remove("hidden")}catch(e){}for(const m of t.messages){const card=document.createElement("div");card.className="card";const head=document.createElement("b");head.textContent=m.senderName+" ("+(m.senderType==="ADMIN"?"Equipe BORA":"Usuário")+")";const body=document.createElement("p");body.textContent=m.content;const date=document.createElement("div");date.className="small";date.textContent=new Date(m.createdAt).toLocaleString("pt-BR");card.append(head,body,date);area.append(card)}if(!t.messages.length)area.textContent="Ainda não há mensagens."}catch(e){$("ticketTitle").textContent="Não foi possível abrir o chamado";area.textContent=e.message}}async function sendTicketReply(){const input=$("ticketReply");const msg=$("ticketReplyMsg");const content=input.value.trim();if(!content){msg.textContent="Digite uma resposta antes de enviar.";return}if(!window.currentSupportTicketId){msg.textContent="Abra um chamado primeiro.";return}msg.textContent="Enviando...";try{await api("/api/admin/support/tickets/"+encodeURIComponent(window.currentSupportTicketId)+"/messages",{method:"POST",body:JSON.stringify({content})});input.value="";msg.textContent="Resposta enviada.";await openTicket(window.currentSupportTicketId);await loadTickets()}catch(e){msg.textContent=e.message}}async function saveTicketChanges(){const msg=$("ticketSaveMsg");if(!window.currentSupportTicketId){msg.textContent="Abra um chamado primeiro.";return}const body={status:$("ticketNewStatus").value};if(!$("ticketAssigneeBox").classList.contains("hidden")){const selected=$("ticketAssignee").value||null;if(selected!==window.currentSupportAssignedAdminId)body.assignedAdminId=selected}msg.textContent="Salvando...";try{await api("/api/admin/support/tickets/"+encodeURIComponent(window.currentSupportTicketId),{method:"PATCH",body:JSON.stringify(body)});msg.textContent="Alterações salvas.";await openTicket(window.currentSupportTicketId);await loadTickets()}catch(e){msg.textContent=e.message}}async function closeTicket(){if(!window.currentSupportTicketId)return;if(!confirm("Deseja encerrar este chamado?"))return;try{await api("/api/admin/support/tickets/"+encodeURIComponent(window.currentSupportTicketId),{method:"PATCH",body:JSON.stringify({status:"CLOSED"})});$("ticketDetail").classList.add("hidden");$("ticketMsg").textContent="Chamado encerrado.";await loadTickets()}catch(e){$("ticketSaveMsg").textContent=e.message}}
+
+async function loadPassengers(){
+  const box=$("passengerList");
+  $("passengerMsg").textContent="";
+  box.textContent="Carregando passageiros...";
+  try{
+    const data=await api("/api/admin/passengers");
+    if(!data.length){
+      box.textContent="Nenhum passageiro cadastrado.";
+      return;
+    }
+    box.innerHTML="<table><tr><th>Nome</th><th>E-mail</th><th>CPF</th><th>Cadastro</th><th>Status</th><th>Ação</th></tr>"+
+      data.map(x=>"<tr><td>"+esc(x.name)+"</td><td>"+esc(x.email)+"</td><td>"+esc(x.cpfCnpj||"-")+"</td><td>"+new Date(x.createdAt).toLocaleDateString("pt-BR")+"</td><td>"+(x.approved?"Aprovado":"Pendente")+"</td><td>"+(x.approved?"—":"<button data-id=\""+esc(x.id)+"\" onclick=\"approvePassenger(this.dataset.id)\">Aprovar</button>")+"</td></tr>").join("")+
+      "</table>";
+  }catch(e){
+    box.textContent=e.message;
+  }
+}
+async function approvePassenger(id){
+  if(!confirm("Deseja registrar a aprovação deste passageiro?"))return;
+  $("passengerMsg").textContent="Registrando aprovação...";
+  try{
+    await api("/api/admin/passengers/"+encodeURIComponent(id)+"/approve",{method:"PATCH"});
+    $("passengerMsg").textContent="Passageiro aprovado com sucesso.";
+    await loadPassengers();
+  }catch(e){
+    $("passengerMsg").textContent=e.message;
+  }
+}
+
+
+async function loadDriverReviews(){
+  const box=$("driverList");
+  $("driverMsg").textContent="";
+  box.textContent="Carregando análises pendentes...";
+  try{
+    const data=await api("/api/admin/driver-review/pending");
+    const drivers=data.drivers||[];
+    if(!drivers.length){
+      box.textContent="Nenhum documento ou veículo pendente de análise.";
+      return;
+    }
+    box.innerHTML=drivers.map(d=>{
+      const docs=d.documents.map(x=>
+        "<div class=\"card\"><b>Documento: "+esc(x.type)+"</b><p>CNH: "+esc(x.licenseNumber||"-")+" | Categoria: "+esc(x.licenseCategory||"-")+"</p><p>Validade: "+(x.licenseExpiresAt?new Date(x.licenseExpiresAt).toLocaleDateString("pt-BR"):"-")+"</p>"+
+        "<button data-kind=\"documents\" data-id=\""+esc(x.id)+"\" onclick=\"openDriverFiles(this.dataset.kind,this.dataset.id)\">Ver arquivos</button> "+
+        "<button onclick=\"reviewDriverItem('documents','"+esc(x.id)+"','APPROVED')\">Aprovar</button> "+
+        "<button class=\"dark\" onclick=\"reviewDriverItem('documents','"+esc(x.id)+"','REJECTED')\">Rejeitar</button></div>"
+      ).join("");
+      const vehicles=d.vehicles.map(x=>
+        "<div class=\"card\"><b>Veículo: "+esc(x.make)+" "+esc(x.model)+"</b><p>Placa: "+esc(x.plate)+" | Ano: "+esc(x.year)+" | Cor: "+esc(x.color)+"</p><p>Tipo: "+esc(x.vehicleType)+"</p>"+
+        "<button data-kind=\"vehicles\" data-id=\""+esc(x.id)+"\" onclick=\"openDriverFiles(this.dataset.kind,this.dataset.id)\">Ver arquivos</button> "+
+        "<button onclick=\"reviewDriverItem('vehicles','"+esc(x.id)+"','APPROVED')\">Aprovar</button> "+
+        "<button class=\"dark\" onclick=\"reviewDriverItem('vehicles','"+esc(x.id)+"','REJECTED')\">Rejeitar</button></div>"
+      ).join("");
+      return "<section class=\"card\"><h3>"+esc(d.user?.name)+"</h3><p>"+esc(d.user?.email)+"</p>"+docs+vehicles+"</section>";
+    }).join("");
+  }catch(e){
+    box.textContent=e.message;
+  }
+}
+async function openDriverFiles(kind,id){
+  const box=$("driverFiles");
+  box.textContent="Obtendo acesso temporário aos arquivos...";
+  try{
+    const data=await api("/api/admin/driver-review/"+kind+"/"+encodeURIComponent(id)+"/files");
+    const files=Object.entries(data.files||{}).filter(([,url])=>!!url);
+    box.innerHTML="<section class=\"card\"><h3>Arquivos para análise</h3>"+
+      (files.length?files.map(([name,url])=>"<p><a href=\""+esc(url)+"\" target=\"_blank\" rel=\"noopener noreferrer\">Abrir "+esc(name)+"</a></p>").join(""):"Nenhum arquivo disponível.")+
+      "<p class=\"small\">Os links são temporários e expiram em aproximadamente 5 minutos.</p></section>";
+  }catch(e){
+    box.textContent=e.message;
+  }
+}
+async function reviewDriverItem(kind,id,decision){
+  let rejectionReason="";
+  if(decision==="REJECTED"){
+    rejectionReason=prompt("Informe o motivo da rejeição (obrigatório, até 500 caracteres):")||"";
+    rejectionReason=rejectionReason.trim();
+    if(!rejectionReason){
+      alert("O motivo da rejeição é obrigatório.");
+      return;
+    }
+    if(rejectionReason.length>500){
+      alert("O motivo deve ter no máximo 500 caracteres.");
+      return;
+    }
+  }else if(!confirm("Confirma a aprovação deste cadastro?")){
+    return;
+  }
+  $("driverMsg").textContent="Registrando análise...";
+  try{
+    await api("/api/admin/driver-review/"+kind+"/"+encodeURIComponent(id),{
+      method:"PATCH",
+      body:JSON.stringify({decision,...(decision==="REJECTED"?{rejectionReason}:{})})
+    });
+    $("driverMsg").textContent=decision==="APPROVED"?"Cadastro aprovado.":"Cadastro rejeitado.";
+    $("driverFiles").replaceChildren();
+    await loadDriverReviews();
+  }catch(e){
+    $("driverMsg").textContent=e.message;
+  }
+}
+
 function esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 start();
 
