@@ -60,6 +60,8 @@ model User {
   passengerRides      Ride[]               @relation("PassengerRides")
   messages            Message[]            @relation("MessageSender")
   passwordResetTokens PasswordResetToken[]
+  supportTickets SupportTicket[]
+  supportMessages SupportMessage[] @relation("SupportUserMessages")
 
   @@unique([email, role])
 }
@@ -235,6 +237,8 @@ model AdminAccount {
   updatedAt    DateTime  @updatedAt
 
   auditLogs AdminAuditLog[]
+  assignedSupportTickets SupportTicket[] @relation("SupportAssignedAdmin")
+  supportMessages SupportMessage[] @relation("SupportAdminMessages")
 }
 
 model AdminActivationToken {
@@ -267,4 +271,54 @@ model AdminAuditLog {
 
   @@index([actorId, createdAt])
   @@index([entityType, entityId])
+}
+
+enum SupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  CLOSED
+}
+
+enum SupportMessageSenderType {
+  USER
+  ADMIN
+}
+
+model SupportTicket {
+  id              String              @id @default(cuid())
+  userId          String
+  assignedAdminId String?
+  subject         String
+  category        String?
+  status          SupportTicketStatus @default(OPEN)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+  closedAt        DateTime?
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Restrict)
+  assignedAdmin AdminAccount? @relation("SupportAssignedAdmin", fields: [assignedAdminId], references: [id], onDelete: SetNull)
+  messages     SupportMessage[]
+
+  @@index([userId, updatedAt])
+  @@index([status, updatedAt])
+  @@index([assignedAdminId, status])
+}
+
+model SupportMessage {
+  id           String                   @id @default(cuid())
+  ticketId     String
+  senderType   SupportMessageSenderType
+  senderUserId String?
+  senderAdminId String?
+  senderName   String
+  content      String                   @db.Text
+  createdAt    DateTime                 @default(now())
+
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  senderUser User?         @relation("SupportUserMessages", fields: [senderUserId], references: [id], onDelete: SetNull)
+  senderAdmin AdminAccount? @relation("SupportAdminMessages", fields: [senderAdminId], references: [id], onDelete: SetNull)
+
+  @@index([ticketId, createdAt])
+  @@index([senderUserId, createdAt])
+  @@index([senderAdminId, createdAt])
 }
