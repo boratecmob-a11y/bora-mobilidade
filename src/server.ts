@@ -525,7 +525,7 @@ app.post("/api/auth/register", async (req, res) => {
     return res.status(400).json({ error: "Selecione um tipo de veículo válido" });
   }
 
-  if (r === "PASSENGER") {
+  if (r === "PASSENGER" || r === "DRIVER") {
     if (
       typeof profilePhoto !== "string" ||
       profilePhoto.length > 4500000 ||
@@ -562,7 +562,7 @@ app.post("/api/auth/register", async (req, res) => {
       return res.status(409).json({ error: "Este CPF já está cadastrado" });
     }
 
-    if (r === "PASSENGER") {
+    if (profilePhoto) {
       uploaded = await cloudinary.uploader.upload(profilePhoto, {
         folder: "bora/profile",
         resource_type: "image",
@@ -821,6 +821,60 @@ app.put("/api/profile", auth, async (req, res) => {
   }
 });
 
+
+
+app.delete("/api/profile", auth, async (req, res) => {
+  if (!role(req, Role.PASSENGER)) {
+    return res.status(403).json({ error: "Apenas passageiros podem encerrar esta conta." });
+  }
+
+  try {
+    const userId = (req as any).user.id;
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, profilePhotoPublicId: true }
+    });
+
+    if (!user) return res.status(404).json({ error: "Usuário não encontrado." });
+
+    const passwordHash = await bcrypt.hash(
+      createHash("sha256")
+        .update(`${user.id}:${Date.now()}:${randomInt(0, 1000000000)}`)
+        .digest("hex"),
+      10
+    );
+
+    await prisma.$transaction([
+      prisma.passwordResetToken.deleteMany({ where: { userId } }),
+      prisma.user.update({
+        where: { id: userId },
+        data: {
+          name: "Conta encerrada",
+          email: `deleted-${user.id}@deleted.bora.invalid`,
+          passwordHash,
+          cpfCnpj: null,
+          phone: null,
+          profilePhotoUrl: null,
+          profilePhotoPublicId: null,
+          deletedAt: new Date()
+        }
+      })
+    ]);
+
+    if (user.profilePhotoPublicId) {
+      try {
+        await cloudinary.uploader.destroy(user.profilePhotoPublicId);
+      } catch (photoError) {
+        console.error("Não foi possível remover a foto da conta encerrada:", photoError);
+      }
+    }
+
+    return res.json({ message: "Conta encerrada com sucesso." });
+  } catch (error) {
+    console.error("Erro ao encerrar conta:", error);
+    return res.status(500).json({ error: "Não foi possível encerrar a conta agora." });
+  }
+});
 
 function validateDriverFile(data: unknown) {
   if (typeof data !== "string") throw new Error("Arquivo não informado.");
@@ -2169,47 +2223,50 @@ function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function fareFor(distanceKm: number, vehicleType: VehicleType = VehicleType.CAR) {
-  const base = Number(process.env.BORA_BASE_FARE || 1.90);
-  const perKm = Number(process.env.BORA_PRICE_PER_KM || 1.35);
-  const avgSpeed = Number(process.env.BORA_AVG_SPEED_KMH || 30);
-  const minutes = (distanceKm / Math.max(avgSpeed, 1)) * 60;
-  const perMinute = Number(process.env.BORA_PRICE_PER_MINUTE || 0.27);
 
-  // Horário local de Goiânia, incluindo mudanças oficiais de fuso.
+async function routeFor(points: Array<{ latitude: number; longitude: number }>) {
+  if (points.length < 2) throw new Error("Rota inválida");
+  const coordinates = points.map(p => `${p.longitude},${p.latitude}`).join(";");
+  const url = `https://router.project-osrm.org/route/v1/driving/${coordinates}?overview=false`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error("Serviço de rotas indisponível");
+  const data: any = await response.json();
+  if (data.code !== "Ok" || !data.routes?.[0]) throw new Error("Não foi possível calcular a rota");
+  return {
+    distanceKm: data.routes[0].distance / 1000,
+    durationMinutes: data.routes[0].duration / 60
+  };
+}
+
+function fareFor(distanceKm: number, durationMinutes: number, vehicleType: VehicleType = VehicleType.CAR) {
+  const base = Number(process.env.BORA_BASE_FARE || 1.90);
+  const perKm = Number(process.env.BORA_PRICE_PER_KM || 1.70);
+  const perMinute = Number(process.env.BORA_PRICE_PER_MINUTE || 0.40);
+
   const parts = new Intl.DateTimeFormat("en-US", {
     timeZone: "America/Sao_Paulo",
-    weekday: "short",
     hour: "2-digit",
     minute: "2-digit",
     hourCycle: "h23"
   }).formatToParts(new Date());
 
-  const part = (type: string) =>
-    parts.find(p => p.type === type)?.value || "";
-
-  const weekday = part("weekday");
-  const hour = Number(part("hour"));
-  const minute = Number(part("minute"));
-  const timeOfDay = hour * 60 + minute;
-  const isWeekday = ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(weekday);
+  const part = (type: string) => parts.find(p => p.type === type)?.value || "";
+  const timeOfDay = Number(part("hour")) * 60 + Number(part("minute"));
 
   let dynamicPercent = 0;
-  if (isWeekday && timeOfDay >= 360 && timeOfDay < 540) {
-    dynamicPercent = 15;
-  } else if (isWeekday && timeOfDay >= 1020 && timeOfDay < 1200) {
+  if (timeOfDay >= 360 && timeOfDay < 510) {
     dynamicPercent = 20;
+  } else if (timeOfDay >= 990 && timeOfDay < 1200) {
+    dynamicPercent = 25;
   }
 
-  const normalFare = base + distanceKm * perKm + minutes * perMinute;
+  const normalFare = base + distanceKm * perKm + durationMinutes * perMinute;
   const fareWithDynamic = normalFare * (1 + dynamicPercent / 100);
-  const fare = vehicleType === VehicleType.MOTO
-    ? fareWithDynamic * 0.90
-    : fareWithDynamic;
+  const fare = vehicleType === VehicleType.MOTO ? fareWithDynamic * 0.90 : fareWithDynamic;
 
   return {
     distanceKm: Number(distanceKm.toFixed(2)),
-    durationMin: Math.max(1, Math.round(minutes)),
+    durationMin: Math.max(1, Math.round(durationMinutes)),
     dynamicPercent,
     estimatedFare: Number(fare.toFixed(2))
   };
@@ -2217,30 +2274,96 @@ function fareFor(distanceKm: number, vehicleType: VehicleType = VehicleType.CAR)
 
 app.get("/api/rides/estimate", auth, async (req, res) => {
   if (!role(req, Role.PASSENGER)) return res.status(403).json({ error: "Apenas passageiros" });
-  const originLat = Number(req.query.originLat), originLng = Number(req.query.originLng), destinationLat = Number(req.query.destinationLat), destinationLng = Number(req.query.destinationLng);
+
+  const originLat = Number(req.query.originLat);
+  const originLng = Number(req.query.originLng);
+  const destinationLat = Number(req.query.destinationLat);
+  const destinationLng = Number(req.query.destinationLng);
   const vehicleType = String(req.query.vehicleType || VehicleType.CAR);
-  if (![VehicleType.CAR, VehicleType.MOTO].includes(vehicleType as VehicleType)) return res.status(400).json({ error: "Tipo de veículo inválido. Use CAR ou MOTO" });
-  if ([originLat, originLng, destinationLat, destinationLng].some(v => !Number.isFinite(v))) return res.status(400).json({ error: "Coordenadas inválidas" });
-  const stopCount = Number(req.query.stopCount || 0);
-  if (!Number.isInteger(stopCount) || stopCount < 0 || stopCount > 10) return res.status(400).json({ error: "Informe de 0 a 10 paradas" });
-  const quote = fareFor(haversineKm(originLat, originLng, destinationLat, destinationLng), vehicleType as VehicleType);
-  const stopsFee = Number((stopCount * 5).toFixed(2));
-  res.json({ ...quote, baseEstimatedFare: quote.estimatedFare, stopsCount: stopCount, stopsFee, estimatedFare: Number((quote.estimatedFare + stopsFee).toFixed(2)) });
+
+  if (![VehicleType.CAR, VehicleType.MOTO].includes(vehicleType as VehicleType)) {
+    return res.status(400).json({ error: "Tipo de veículo inválido. Use CAR ou MOTO" });
+  }
+
+  const coordinates = [originLat, originLng, destinationLat, destinationLng];
+  if (coordinates.some(v => !Number.isFinite(v)) ||
+      Math.abs(originLat) > 90 || Math.abs(destinationLat) > 90 ||
+      Math.abs(originLng) > 180 || Math.abs(destinationLng) > 180) {
+    return res.status(400).json({ error: "Coordenadas inválidas" });
+  }
+
+  let stops: any[] = [];
+  try {
+    if (req.query.stops) {
+      if (typeof req.query.stops !== "string") throw new Error();
+      stops = JSON.parse(req.query.stops);
+    }
+  } catch {
+    return res.status(400).json({ error: "Lista de paradas inválida" });
+  }
+
+  if (!Array.isArray(stops) || stops.length > 10 ||
+      stops.some(stop => !stop || typeof stop.latitude !== "number" ||
+        typeof stop.longitude !== "number" || !Number.isFinite(stop.latitude) ||
+        !Number.isFinite(stop.longitude) || Math.abs(stop.latitude) > 90 ||
+        Math.abs(stop.longitude) > 180)) {
+    return res.status(400).json({ error: "Informe até 10 paradas com coordenadas válidas" });
+  }
+
+  try {
+    const points = [
+      { latitude: originLat, longitude: originLng },
+      ...stops.map(stop => ({ latitude: stop.latitude, longitude: stop.longitude })),
+      { latitude: destinationLat, longitude: destinationLng }
+    ];
+    const route = await routeFor(points);
+    const quote = fareFor(route.distanceKm, route.durationMinutes, vehicleType as VehicleType);
+    return res.json({ ...quote, stopsCount: stops.length });
+  } catch {
+    return res.status(503).json({ error: "Não foi possível calcular a rota agora. Tente novamente." });
+  }
 });
 
 app.post("/api/rides", auth, async (req, res) => {
   if (!role(req, Role.PASSENGER)) return res.status(403).json({ error: "Apenas passageiros" });
+
   const { originLat, originLng, destinationLat, destinationLng, vehicleType, stops = [] } = req.body;
-  if ([originLat, originLng, destinationLat, destinationLng].some(v => typeof v !== "number")) return res.status(400).json({ error: "Dados da corrida inválidos" });
-  if (!Array.isArray(stops) || stops.length > 10 || stops.some((stop: any) => !stop || typeof stop.latitude !== "number" || typeof stop.longitude !== "number" || !Number.isFinite(stop.latitude) || !Number.isFinite(stop.longitude))) return res.status(400).json({ error: "Paradas inválidas. Informe até 10 paradas com coordenadas válidas" });
-  if (![VehicleType.CAR, VehicleType.MOTO].includes(vehicleType)) return res.status(400).json({ error: "Tipo de veículo obrigatório. Use CAR ou MOTO" });
-  const quote = fareFor(haversineKm(originLat, originLng, destinationLat, destinationLng), vehicleType as VehicleType);
-  const baseFare = quote.estimatedFare;
-  const stopsFee = Number((stops.length * 5).toFixed(2));
-  const estimatedFare = Number((baseFare + stopsFee).toFixed(2));
-  const baseCommission = Math.min(baseFare <= 20 ? 1 : 2, baseFare);
-  const commission = Number((baseCommission + stops.length).toFixed(2));
-  const payout = Number((baseFare - baseCommission + stops.length * 4).toFixed(2));
+
+  if ([originLat, originLng, destinationLat, destinationLng].some(v => typeof v !== "number" || !Number.isFinite(v)) ||
+      Math.abs(originLat) > 90 || Math.abs(destinationLat) > 90 ||
+      Math.abs(originLng) > 180 || Math.abs(destinationLng) > 180) {
+    return res.status(400).json({ error: "Dados da corrida inválidos" });
+  }
+
+  if (!Array.isArray(stops) || stops.length > 10 ||
+      stops.some((stop: any) => !stop || typeof stop.latitude !== "number" ||
+        typeof stop.longitude !== "number" || !Number.isFinite(stop.latitude) ||
+        !Number.isFinite(stop.longitude) || Math.abs(stop.latitude) > 90 ||
+        Math.abs(stop.longitude) > 180)) {
+    return res.status(400).json({ error: "Paradas inválidas. Informe até 10 paradas com coordenadas válidas" });
+  }
+
+  if (![VehicleType.CAR, VehicleType.MOTO].includes(vehicleType)) {
+    return res.status(400).json({ error: "Tipo de veículo obrigatório. Use CAR ou MOTO" });
+  }
+
+  let quote;
+  try {
+    const points = [
+      { latitude: originLat, longitude: originLng },
+      ...stops.map((stop: any) => ({ latitude: stop.latitude, longitude: stop.longitude })),
+      { latitude: destinationLat, longitude: destinationLng }
+    ];
+    const route = await routeFor(points);
+    quote = fareFor(route.distanceKm, route.durationMinutes, vehicleType as VehicleType);
+  } catch {
+    return res.status(503).json({ error: "Não foi possível calcular a rota agora. Tente novamente." });
+  }
+
+  const estimatedFare = quote.estimatedFare;
+  const commission = Number(Math.min(estimatedFare <= 20 ? 1 : 2, estimatedFare).toFixed(2));
+  const payout = Number((estimatedFare - commission).toFixed(2));
+
   const ride = await prisma.ride.create({
     data: {
       passengerId: (req as any).user.id,
@@ -2253,10 +2376,23 @@ app.post("/api/rides", auth, async (req, res) => {
       commission,
       driverPayout: payout,
       status: RideStatus.SEARCHING_DRIVER,
-      stops: { create: stops.map((stop: any, index: number) => ({ latitude: stop.latitude, longitude: stop.longitude, address: typeof stop.address === "string" ? stop.address : null, position: index + 1 })) }
+      stops: {
+        create: stops.map((stop: any, index: number) => ({
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+          address: typeof stop.address === "string" ? stop.address : null,
+          position: index + 1
+        }))
+      }
     }
   });
-  res.status(201).json({ ...ride, distanceKm: quote.distanceKm, durationMin: quote.durationMin, dynamicPercent: quote.dynamicPercent });
+
+  return res.status(201).json({
+    ...ride,
+    distanceKm: quote.distanceKm,
+    durationMin: quote.durationMin,
+    dynamicPercent: quote.dynamicPercent
+  });
 });
 
 app.get("/api/rides/:id", auth, async (req, res) => {
